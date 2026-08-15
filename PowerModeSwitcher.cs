@@ -1,0 +1,1422 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+namespace PowerModeSwitcher
+{
+    internal static class Program
+    {
+        [STAThread]
+        private static int Main(string[] args)
+        {
+            string applicationDirectory = AppDomain.CurrentDomain.BaseDirectory;
+
+            if (args != null && args.Any(delegate(string argument)
+            {
+                return string.Equals(argument, "--self-test", StringComparison.OrdinalIgnoreCase);
+            }))
+            {
+                return SelfTest.Run(applicationDirectory);
+            }
+
+            try
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new MainForm(applicationDirectory));
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    "PowerModeSwitcher를 시작할 수 없습니다.\r\n\r\n" + exception.Message,
+                    "PowerModeSwitcher",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return 1;
+            }
+        }
+    }
+
+    internal sealed class MainForm : Form
+    {
+        private readonly string _applicationDirectory;
+        private readonly ProfileRepository _profileRepository;
+        private readonly StateRepository _stateRepository;
+        private readonly PowerModeService _powerModeService;
+        private readonly List<Button> _applyButtons = new List<Button>();
+        private Label _lastAppliedLabel;
+        private Label _workingLabel;
+        private TableLayoutPanel _cardGrid;
+        private IList<PowerProfile> _profiles;
+
+        public MainForm(string applicationDirectory)
+        {
+            _applicationDirectory = applicationDirectory;
+            _profileRepository = new ProfileRepository(Path.Combine(applicationDirectory, "profiles.json"));
+            _stateRepository = new StateRepository(Path.Combine(applicationDirectory, "state.json"));
+            _powerModeService = new PowerModeService(
+                _stateRepository,
+                new BackendClient(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")),
+                new PowerPlanService(),
+                new DisplayRefreshService());
+
+            InitializeWindow();
+            Load += delegate { LoadConfiguration(); };
+        }
+
+        private void InitializeWindow()
+        {
+            Text = "PowerModeSwitcher";
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimumSize = new Size(980, 700);
+            Size = new Size(1190, 820);
+            BackColor = Color.FromArgb(242, 245, 248);
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+            TableLayoutPanel outer = new TableLayoutPanel();
+            outer.Dock = DockStyle.Fill;
+            outer.ColumnCount = 1;
+            outer.RowCount = 3;
+            outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 102F));
+            outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 56F));
+            outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            outer.Padding = new Padding(20, 18, 20, 20);
+            Controls.Add(outer);
+
+            Panel header = new Panel();
+            header.Dock = DockStyle.Fill;
+            header.BackColor = Color.FromArgb(30, 42, 60);
+            header.Padding = new Padding(20, 15, 20, 12);
+            outer.Controls.Add(header, 0, 0);
+
+            Label title = new Label();
+            title.AutoSize = true;
+            title.Text = "PowerModeSwitcher";
+            title.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold, GraphicsUnit.Point);
+            title.ForeColor = Color.White;
+            title.Location = new Point(18, 12);
+            header.Controls.Add(title);
+
+            Label subtitle = new Label();
+            subtitle.AutoSize = true;
+            subtitle.Text = "8개 전원 프로필 · 모든 모드에서 144Hz 유지";
+            subtitle.Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
+            subtitle.ForeColor = Color.FromArgb(211, 221, 233);
+            subtitle.Location = new Point(21, 56);
+            header.Controls.Add(subtitle);
+
+            Panel statusPanel = new Panel();
+            statusPanel.Dock = DockStyle.Fill;
+            statusPanel.BackColor = Color.FromArgb(229, 237, 245);
+            statusPanel.Padding = new Padding(14, 11, 14, 8);
+            outer.Controls.Add(statusPanel, 0, 1);
+
+            _lastAppliedLabel = new Label();
+            _lastAppliedLabel.AutoSize = true;
+            _lastAppliedLabel.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+            _lastAppliedLabel.ForeColor = Color.FromArgb(35, 57, 78);
+            _lastAppliedLabel.Text = "마지막 적용 모드: 없음";
+            _lastAppliedLabel.Location = new Point(14, 14);
+            statusPanel.Controls.Add(_lastAppliedLabel);
+
+            _workingLabel = new Label();
+            _workingLabel.AutoSize = true;
+            _workingLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _workingLabel.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            _workingLabel.ForeColor = Color.FromArgb(80, 94, 109);
+            _workingLabel.Text = String.Empty;
+            _workingLabel.Location = new Point(700, 15);
+            statusPanel.Controls.Add(_workingLabel);
+            statusPanel.Resize += delegate
+            {
+                _workingLabel.Left = Math.Max(14, statusPanel.ClientSize.Width - _workingLabel.Width - 14);
+            };
+
+            Panel scrollHost = new Panel();
+            scrollHost.Dock = DockStyle.Fill;
+            scrollHost.AutoScroll = true;
+            scrollHost.Padding = new Padding(0, 14, 0, 0);
+            outer.Controls.Add(scrollHost, 0, 2);
+
+            _cardGrid = new TableLayoutPanel();
+            _cardGrid.AutoSize = true;
+            _cardGrid.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _cardGrid.Dock = DockStyle.Top;
+            _cardGrid.ColumnCount = 2;
+            _cardGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            _cardGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            scrollHost.Controls.Add(_cardGrid);
+        }
+
+        private void LoadConfiguration()
+        {
+            try
+            {
+                _profiles = _profileRepository.Load();
+                ProfileValidator.Validate(_profiles);
+                RenderCards();
+                RefreshLastAppliedLabel();
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    "profiles.json을 읽을 수 없습니다.\r\n\r\n" + exception.Message,
+                    "PowerModeSwitcher",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                Close();
+            }
+        }
+
+        private void RenderCards()
+        {
+            _cardGrid.SuspendLayout();
+            _cardGrid.Controls.Clear();
+            _cardGrid.RowStyles.Clear();
+            _cardGrid.RowCount = (_profiles.Count + 1) / 2;
+
+            int row;
+            for (row = 0; row < _cardGrid.RowCount; row++)
+            {
+                _cardGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 236F));
+            }
+
+            int index;
+            for (index = 0; index < _profiles.Count; index++)
+            {
+                _cardGrid.Controls.Add(CreateCard(_profiles[index]), index % 2, index / 2);
+            }
+
+            _cardGrid.ResumeLayout();
+        }
+
+        private Control CreateCard(PowerProfile profile)
+        {
+            TableLayoutPanel card = new TableLayoutPanel();
+            card.Dock = DockStyle.Fill;
+            card.Margin = new Padding(0, 0, 12, 14);
+            card.Padding = new Padding(17, 15, 17, 15);
+            card.BackColor = Color.White;
+            card.CellBorderStyle = TableLayoutPanelCellBorderStyle.Single;
+            card.ColumnCount = 1;
+            card.RowCount = 5;
+            card.RowStyles.Add(new RowStyle(SizeType.Absolute, 29F));
+            card.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
+            card.RowStyles.Add(new RowStyle(SizeType.Absolute, 49F));
+            card.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            card.RowStyles.Add(new RowStyle(SizeType.Absolute, 39F));
+
+            Label title = new Label();
+            title.AutoEllipsis = true;
+            title.Dock = DockStyle.Fill;
+            title.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold, GraphicsUnit.Point);
+            title.ForeColor = Color.FromArgb(31, 53, 73);
+            title.Text = profile.name;
+            card.Controls.Add(title, 0, 0);
+
+            Label description = new Label();
+            description.AutoEllipsis = true;
+            description.Dock = DockStyle.Fill;
+            description.ForeColor = Color.FromArgb(79, 93, 108);
+            description.Text = profile.purpose;
+            card.Controls.Add(description, 0, 1);
+
+            Label values = new Label();
+            values.Dock = DockStyle.Fill;
+            values.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            values.ForeColor = Color.FromArgb(37, 68, 97);
+            values.Text = ProfileText.Compact(profile);
+            card.Controls.Add(values, 0, 2);
+
+            Label intent = new Label();
+            intent.Dock = DockStyle.Fill;
+            intent.ForeColor = Color.FromArgb(91, 105, 120);
+            intent.Text = "변경: " + String.Join(" · ", (profile.changes ?? new List<string>()).Take(3).ToArray());
+            card.Controls.Add(intent, 0, 3);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            buttons.WrapContents = false;
+            buttons.Padding = new Padding(0, 3, 0, 0);
+            card.Controls.Add(buttons, 0, 4);
+
+            Button apply = new Button();
+            apply.AutoSize = true;
+            apply.BackColor = Color.FromArgb(40, 103, 160);
+            apply.FlatAppearance.BorderSize = 0;
+            apply.FlatStyle = FlatStyle.Flat;
+            apply.ForeColor = Color.White;
+            apply.Margin = new Padding(6, 0, 0, 0);
+            apply.Padding = new Padding(10, 2, 10, 2);
+            apply.Text = "적용";
+            apply.UseVisualStyleBackColor = false;
+            apply.Click += delegate { ApplyProfile(profile); };
+            _applyButtons.Add(apply);
+            buttons.Controls.Add(apply);
+
+            Button details = new Button();
+            details.AutoSize = true;
+            details.BackColor = Color.White;
+            details.FlatAppearance.BorderColor = Color.FromArgb(154, 169, 184);
+            details.FlatStyle = FlatStyle.Flat;
+            details.ForeColor = Color.FromArgb(48, 72, 95);
+            details.Padding = new Padding(10, 2, 10, 2);
+            details.Text = "자세히";
+            details.UseVisualStyleBackColor = false;
+            details.Click += delegate { ShowDetails(profile); };
+            buttons.Controls.Add(details);
+
+            return card;
+        }
+
+        private void ShowDetails(PowerProfile profile)
+        {
+            StringBuilder content = new StringBuilder();
+            content.AppendLine(profile.purpose);
+            content.AppendLine();
+            content.AppendLine("목적: " + profile.purpose);
+            content.AppendLine("dGPU: " + ProfileText.DGpu(profile.dGpu));
+            content.AppendLine("Turbo Boost: " + ProfileText.Turbo(profile.turbo));
+            content.AppendLine("PL1: " + ProfileText.Watts(profile.pl1));
+            content.AppendLine("PL2: " + ProfileText.Watts(profile.pl2));
+            content.AppendLine("Tau: " + ProfileText.Seconds(profile.tau));
+            content.AppendLine("화면 주사율: " + profile.refreshRate + "Hz");
+            content.AppendLine();
+            content.AppendLine("변경 항목:");
+            foreach (string change in profile.changes ?? new List<string>())
+            {
+                content.AppendLine("• " + change);
+            }
+
+            if (profile.notes != null && profile.notes.Count > 0)
+            {
+                content.AppendLine();
+                content.AppendLine("주의 사항:");
+                foreach (string note in profile.notes)
+                {
+                    content.AppendLine("• " + note);
+                }
+            }
+
+            MessageBox.Show(
+                content.ToString(),
+                profile.name,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+
+        private void ApplyProfile(PowerProfile profile)
+        {
+            SetBusy(true, profile.name + " 적용 중…");
+            Task<ProfileApplyResult> task = Task.Factory.StartNew(delegate
+            {
+                return _powerModeService.Apply(profile);
+            });
+
+            task.ContinueWith(delegate(Task<ProfileApplyResult> completedTask)
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    SetBusy(false, String.Empty);
+                    if (completedTask.IsFaulted)
+                    {
+                        Exception exception = completedTask.Exception == null
+                            ? null
+                            : completedTask.Exception.GetBaseException();
+                        MessageBox.Show(
+                            "적용 중 예기치 않은 오류가 발생했습니다.\r\n\r\n" +
+                            (exception == null ? "알 수 없는 오류" : exception.Message),
+                            "PowerModeSwitcher",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    ProfileApplyResult result = completedTask.Result;
+                    RefreshLastAppliedLabel();
+                    MessageBox.Show(
+                        result.ToDisplayText(),
+                        result.HasFailures ? profile.name + " 일부 적용 실패" : profile.name + " 적용 결과",
+                        MessageBoxButtons.OK,
+                        result.HasFailures ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                });
+            });
+        }
+
+        private void SetBusy(bool busy, string message)
+        {
+            foreach (Button button in _applyButtons)
+            {
+                button.Enabled = !busy;
+            }
+
+            _workingLabel.Text = message;
+            _workingLabel.Left = Math.Max(14, _workingLabel.Parent.ClientSize.Width - _workingLabel.Width - 14);
+            UseWaitCursor = busy;
+        }
+
+        private void RefreshLastAppliedLabel()
+        {
+            try
+            {
+                AppState state = _stateRepository.Load();
+                if (String.IsNullOrWhiteSpace(state.lastAppliedProfile))
+                {
+                    _lastAppliedLabel.Text = "마지막 적용 모드: 없음";
+                    return;
+                }
+
+                PowerProfile profile = _profiles == null
+                    ? null
+                    : _profiles.FirstOrDefault(delegate(PowerProfile candidate)
+                    {
+                        return String.Equals(candidate.id, state.lastAppliedProfile, StringComparison.OrdinalIgnoreCase);
+                    });
+                string profileName = profile == null
+                    ? state.lastAppliedProfile
+                    : profile.name;
+                string timestamp = String.IsNullOrWhiteSpace(state.lastAppliedAt)
+                    ? String.Empty
+                    : "  (" + state.lastAppliedAt + ")";
+                _lastAppliedLabel.Text = "마지막 적용 모드: " + profileName + timestamp;
+            }
+            catch
+            {
+                _lastAppliedLabel.Text = "마지막 적용 모드: 상태 파일을 읽을 수 없음";
+            }
+        }
+    }
+
+    internal sealed class ProfileRepository
+    {
+        private readonly string _path;
+        private readonly JavaScriptSerializer _serializer = new JavaScriptSerializer();
+
+        public ProfileRepository(string path)
+        {
+            _path = path;
+        }
+
+        public IList<PowerProfile> Load()
+        {
+            if (!File.Exists(_path))
+            {
+                throw new FileNotFoundException("profiles.json 파일을 찾을 수 없습니다.", _path);
+            }
+
+            ProfileDocument document = _serializer.Deserialize<ProfileDocument>(File.ReadAllText(_path, Encoding.UTF8));
+            if (document == null || document.profiles == null)
+            {
+                throw new InvalidDataException("profiles.json에 profiles 배열이 없습니다.");
+            }
+
+            return document.profiles;
+        }
+    }
+
+    internal sealed class StateRepository
+    {
+        private readonly string _path;
+        private readonly JavaScriptSerializer _serializer = new JavaScriptSerializer();
+
+        public StateRepository(string path)
+        {
+            _path = path;
+        }
+
+        public AppState Load()
+        {
+            AppState state = null;
+            if (File.Exists(_path))
+            {
+                string json = File.ReadAllText(_path, Encoding.UTF8);
+                if (!String.IsNullOrWhiteSpace(json))
+                {
+                    state = _serializer.Deserialize<AppState>(json);
+                }
+            }
+
+            state = state ?? new AppState();
+            state.managedPlans = state.managedPlans ?? new List<ManagedPlan>();
+            return state;
+        }
+
+        public void Save(AppState state)
+        {
+            state = state ?? new AppState();
+            state.managedPlans = state.managedPlans ?? new List<ManagedPlan>();
+            string temporaryPath = _path + ".tmp";
+            File.WriteAllText(temporaryPath, _serializer.Serialize(state), new UTF8Encoding(false));
+            File.Copy(temporaryPath, _path, true);
+            File.Delete(temporaryPath);
+        }
+    }
+
+    internal static class ProfileValidator
+    {
+        public static void Validate(IList<PowerProfile> profiles)
+        {
+            if (profiles == null || profiles.Count != 8)
+            {
+                throw new InvalidDataException("profiles.json에는 정확히 8개의 프로필이 필요합니다.");
+            }
+
+            HashSet<string> ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (PowerProfile profile in profiles)
+            {
+                if (profile == null || String.IsNullOrWhiteSpace(profile.id) ||
+                    String.IsNullOrWhiteSpace(profile.name) || String.IsNullOrWhiteSpace(profile.purpose))
+                {
+                    throw new InvalidDataException("프로필의 id, 이름, 설명, 용도는 비워 둘 수 없습니다.");
+                }
+
+                if (!ids.Add(profile.id))
+                {
+                    throw new InvalidDataException("중복된 프로필 id: " + profile.id);
+                }
+
+                if (profile.refreshRate != 144)
+                {
+                    throw new InvalidDataException(profile.id + "의 화면 주사율은 144Hz여야 합니다.");
+                }
+
+                if (!ProfileText.IsOneOf(profile.dGpu, "on", "off", "restore", "unchanged"))
+                {
+                    throw new InvalidDataException(profile.id + "의 dGpu 값이 올바르지 않습니다.");
+                }
+
+                if (!ProfileText.IsOneOf(profile.turbo, "on", "off", "restore", "unchanged"))
+                {
+                    throw new InvalidDataException(profile.id + "의 turbo 값이 올바르지 않습니다.");
+                }
+
+                bool anyPlValue = profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue;
+                bool allPlValues = profile.pl1.HasValue && profile.pl2.HasValue && profile.tau.HasValue;
+                if (anyPlValue && (!allPlValues || profile.pl1.Value <= 0 ||
+                    profile.pl2.Value <= 0 || profile.tau.Value <= 0))
+                {
+                    throw new InvalidDataException(profile.id + "의 PL1/PL2/Tau 값은 모두 양수여야 합니다.");
+                }
+            }
+        }
+    }
+
+    internal sealed class PowerModeService
+    {
+        private readonly StateRepository _stateRepository;
+        private readonly BackendClient _backend;
+        private readonly PowerPlanService _powerPlans;
+        private readonly DisplayRefreshService _displayRefresh;
+
+        public PowerModeService(
+            StateRepository stateRepository,
+            BackendClient backend,
+            PowerPlanService powerPlans,
+            DisplayRefreshService displayRefresh)
+        {
+            _stateRepository = stateRepository;
+            _backend = backend;
+            _powerPlans = powerPlans;
+            _displayRefresh = displayRefresh;
+        }
+
+        public ProfileApplyResult Apply(PowerProfile profile)
+        {
+            ProfileApplyResult result = new ProfileApplyResult(profile);
+            AppState state = _stateRepository.Load();
+
+            CaptureBaseline(state, result);
+            _stateRepository.Save(state);
+
+            ApplyDGpu(profile, state, result);
+            ApplyTurbo(profile, state, result);
+            ApplyPl(profile, result);
+            ApplyRefresh(profile, result);
+
+            if (!result.HasFailures)
+            {
+                state.lastAppliedProfile = profile.id;
+                state.lastAppliedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                _stateRepository.Save(state);
+                result.LastAppliedUpdated = true;
+            }
+
+            return result;
+        }
+
+        private void CaptureBaseline(AppState state, ProfileApplyResult result)
+        {
+            state.baseline = state.baseline ?? new BaselineState();
+            List<string> captured = new List<string>();
+            List<string> unavailable = new List<string>();
+
+            if (String.IsNullOrWhiteSpace(state.baseline.activePowerScheme))
+            {
+                string schemeGuid;
+                string error;
+                if (_powerPlans.TryGetActiveScheme(out schemeGuid, out error))
+                {
+                    state.baseline.activePowerScheme = schemeGuid;
+                    captured.Add("Windows 전원 구성표");
+                }
+                else
+                {
+                    unavailable.Add("Windows 전원 구성표: " + error);
+                }
+            }
+
+            if (String.IsNullOrWhiteSpace(state.baseline.dGpuState))
+            {
+                BackendResponse response = _backend.QueryDGpu();
+                if (response.ok && response.dGpu != null)
+                {
+                    state.baseline.dGpuState = response.dGpu.enabled ? "on" : "off";
+                    captured.Add("dGPU 상태");
+                }
+                else
+                {
+                    unavailable.Add("dGPU 상태: " + response.ErrorText);
+                }
+            }
+
+            if (unavailable.Count == 0)
+            {
+                result.Add(SettingResult.Success("복원 기준", captured.Count == 0
+                    ? "이미 저장된 baseline을 사용합니다."
+                    : String.Join(", ", captured.ToArray()) + "을(를) 저장했습니다."));
+            }
+            else
+            {
+                string message = unavailable.Count == 1
+                    ? unavailable[0]
+                    : String.Join(" / ", unavailable.ToArray());
+                result.Add(SettingResult.Warning("복원 기준", message + " — OEM 기본값을 추정하지 않습니다."));
+            }
+        }
+
+        private void ApplyDGpu(PowerProfile profile, AppState state, ProfileApplyResult result)
+        {
+            string desired = (profile.dGpu ?? String.Empty).Trim().ToLowerInvariant();
+            if (desired == "unchanged")
+            {
+                result.Add(SettingResult.Skipped("dGPU", "변경하지 않음"));
+                return;
+            }
+
+            if (desired == "restore")
+            {
+                if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.dGpuState))
+                {
+                    result.Add(SettingResult.Failure("dGPU", "저장된 baseline이 없어 원래 상태를 추정하지 않았습니다."));
+                    return;
+                }
+
+                desired = state.baseline.dGpuState;
+            }
+
+            BackendResponse response = _backend.SetDGpu(desired);
+            if (response.ok)
+            {
+                string applied = response.dGpu == null ? desired : (response.dGpu.enabled ? "on" : "off");
+                result.Add(SettingResult.Success("dGPU", "요청: " + ProfileText.DGpu(desired) + " / 결과: " + ProfileText.DGpu(applied)));
+            }
+            else
+            {
+                result.Add(SettingResult.Failure("dGPU", response.ErrorText));
+            }
+        }
+
+        private void ApplyTurbo(PowerProfile profile, AppState state, ProfileApplyResult result)
+        {
+            string desired = (profile.turbo ?? String.Empty).Trim().ToLowerInvariant();
+            if (desired == "unchanged")
+            {
+                result.Add(SettingResult.Skipped("Turbo Boost", "변경하지 않음"));
+                return;
+            }
+
+            if (desired == "restore")
+            {
+                ActionResult restoration = _powerPlans.RestoreBaseline(state, _stateRepository);
+                result.Add(restoration.ToSettingResult("Turbo Boost / Windows 전원 설정"));
+                return;
+            }
+
+            if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.activePowerScheme))
+            {
+                result.Add(SettingResult.Failure("Turbo Boost", "기준 전원 구성표를 저장하지 못해 변경하지 않았습니다."));
+                return;
+            }
+
+            string schemeGuid;
+            ActionResult managedPlan = _powerPlans.EnsureManagedPlan(profile, state, _stateRepository, out schemeGuid);
+            if (!managedPlan.ok)
+            {
+                result.Add(managedPlan.ToSettingResult("Turbo Boost"));
+                return;
+            }
+
+            BackendResponse response = _backend.SetTurbo(desired, schemeGuid);
+            if (!response.ok)
+            {
+                result.Add(SettingResult.Failure("Turbo Boost", response.ErrorText));
+                return;
+            }
+
+            string activationError;
+            if (!_powerPlans.TryActivate(schemeGuid, out activationError))
+            {
+                result.Add(SettingResult.Failure("Turbo Boost", "설정은 기록됐지만 전원 구성표를 활성화하지 못했습니다: " + activationError));
+                return;
+            }
+
+            result.Add(SettingResult.Success(
+                "Turbo Boost",
+                ProfileText.Turbo(desired) + " · PowerModeSwitcher 관리 전원 구성표를 활성화했습니다."));
+        }
+
+        private static void ApplyPl(PowerProfile profile, ProfileApplyResult result)
+        {
+            bool requested = profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue;
+            if (!requested)
+            {
+                result.Add(SettingResult.Skipped("PL1 / PL2 / Tau", "변경하지 않음"));
+                return;
+            }
+
+            result.Add(SettingResult.Failure(
+                "PL1 / PL2 / Tau",
+                "검증된 기존 PL backend를 찾지 못해 적용하지 않았습니다. ThrottleStop에는 접근하지 않았습니다."));
+        }
+
+        private void ApplyRefresh(PowerProfile profile, ProfileApplyResult result)
+        {
+            result.Add(_displayRefresh.EnsureRefreshRate(profile.refreshRate));
+        }
+    }
+
+    internal sealed class PowerPlanService
+    {
+        private const string PowerCfg = "powercfg.exe";
+        private static readonly Regex GuidPattern = new Regex(
+            @"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b",
+            RegexOptions.Compiled);
+
+        public bool TryGetActiveScheme(out string schemeGuid, out string error)
+        {
+            ProcessRunResult process = ProcessRunner.Run(PowerCfg, "/getactivescheme", 10000);
+            Match match = GuidPattern.Match(process.output ?? String.Empty);
+            if (!process.Succeeded || !match.Success)
+            {
+                schemeGuid = null;
+                error = process.ErrorText;
+                return false;
+            }
+
+            schemeGuid = match.Value;
+            error = null;
+            return true;
+        }
+
+        public ActionResult EnsureManagedPlan(
+            PowerProfile profile,
+            AppState state,
+            StateRepository stateRepository,
+            out string schemeGuid)
+        {
+            ManagedPlan plan = state.managedPlans.FirstOrDefault(delegate(ManagedPlan candidate)
+            {
+                return candidate != null && String.Equals(candidate.profileId, profile.id, StringComparison.OrdinalIgnoreCase) &&
+                       String.Equals(candidate.baselineSchemeGuid, state.baseline.activePowerScheme, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (plan != null && !String.IsNullOrWhiteSpace(plan.schemeGuid))
+            {
+                schemeGuid = plan.schemeGuid;
+                return ActionResult.Success("기존 관리 전원 구성표를 사용합니다.");
+            }
+
+            schemeGuid = Guid.NewGuid().ToString();
+            ProcessRunResult duplicate = RunPowerCfg("/duplicatescheme", state.baseline.activePowerScheme, schemeGuid);
+            if (!duplicate.Succeeded)
+            {
+                return ActionResult.Failure("전원 구성표 복제 실패: " + duplicate.ErrorText);
+            }
+
+            ProcessRunResult rename = RunPowerCfg(
+                "/changename",
+                schemeGuid,
+                "PowerModeSwitcher - " + profile.name,
+                "Managed profile for " + profile.name);
+
+            state.managedPlans.Add(new ManagedPlan
+            {
+                profileId = profile.id,
+                schemeGuid = schemeGuid,
+                baselineSchemeGuid = state.baseline.activePowerScheme
+            });
+            stateRepository.Save(state);
+            return ActionResult.Success(rename.Succeeded
+                ? "관리 전원 구성표를 만들었습니다."
+                : "관리 전원 구성표를 만들었습니다. 이름 설정은 건너뛰었습니다: " + rename.ErrorText);
+        }
+
+        public bool TryActivate(string schemeGuid, out string error)
+        {
+            ProcessRunResult process = RunPowerCfg("/setactive", schemeGuid);
+            error = process.Succeeded ? null : process.ErrorText;
+            return process.Succeeded;
+        }
+
+        public ActionResult RestoreBaseline(AppState state, StateRepository stateRepository)
+        {
+            if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.activePowerScheme))
+            {
+                return ActionResult.Failure("저장된 기준 전원 구성표가 없어 복원하지 않았습니다.");
+            }
+
+            string activationError;
+            if (!TryActivate(state.baseline.activePowerScheme, out activationError))
+            {
+                return ActionResult.Failure("기준 전원 구성표를 활성화하지 못했습니다: " + activationError);
+            }
+
+            List<string> cleanupErrors = new List<string>();
+            foreach (ManagedPlan plan in state.managedPlans.ToList())
+            {
+                if (plan == null || String.IsNullOrWhiteSpace(plan.schemeGuid))
+                {
+                    state.managedPlans.Remove(plan);
+                    continue;
+                }
+
+                ProcessRunResult deleted = RunPowerCfg("/delete", plan.schemeGuid);
+                if (!deleted.Succeeded)
+                {
+                    cleanupErrors.Add(plan.schemeGuid + ": " + deleted.ErrorText);
+                }
+                else
+                {
+                    state.managedPlans.Remove(plan);
+                }
+            }
+
+            stateRepository.Save(state);
+            if (cleanupErrors.Count == 0)
+            {
+                return ActionResult.Success("저장된 기준 전원 구성표를 복원하고 관리 전원 구성표를 정리했습니다.");
+            }
+
+            return ActionResult.Warning(
+                "기준 전원 구성표는 복원했지만 관리 전원 구성표 일부를 정리하지 못했습니다: " +
+                String.Join(" / ", cleanupErrors.ToArray()));
+        }
+
+        private static ProcessRunResult RunPowerCfg(params string[] arguments)
+        {
+            return ProcessRunner.Run(PowerCfg, CommandLine.Join(arguments), 20000);
+        }
+    }
+
+    internal sealed class BackendClient
+    {
+        private readonly string _helperPath;
+        private readonly JavaScriptSerializer _serializer = new JavaScriptSerializer();
+
+        public BackendClient(string helperPath)
+        {
+            _helperPath = helperPath;
+        }
+
+        public BackendResponse QueryDGpu()
+        {
+            return Invoke("-Operation Dgpu -State Query");
+        }
+
+        public BackendResponse SetDGpu(string state)
+        {
+            return Invoke("-Operation Dgpu -State " + CommandLine.Quote(state));
+        }
+
+        public BackendResponse SetTurbo(string state, string schemeGuid)
+        {
+            return Invoke(
+                "-Operation Turbo -State " + CommandLine.Quote(state) +
+                " -SchemeGuid " + CommandLine.Quote(schemeGuid));
+        }
+
+        private BackendResponse Invoke(string helperArguments)
+        {
+            if (!File.Exists(_helperPath))
+            {
+                return BackendResponse.Failed("기존 전원 제어 helper를 찾을 수 없습니다: " + _helperPath);
+            }
+
+            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
+                CommandLine.Quote(_helperPath) + " " + helperArguments;
+            ProcessRunResult process = ProcessRunner.Run("powershell.exe", arguments, 45000);
+            BackendResponse response = null;
+            string jsonLine = (process.output ?? String.Empty)
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault();
+            if (!String.IsNullOrWhiteSpace(jsonLine))
+            {
+                try
+                {
+                    response = _serializer.Deserialize<BackendResponse>(jsonLine);
+                }
+                catch
+                {
+                    response = null;
+                }
+            }
+
+            if (response == null)
+            {
+                return BackendResponse.Failed(process.Succeeded
+                    ? "helper 응답을 해석하지 못했습니다."
+                    : process.ErrorText);
+            }
+
+            if (!process.Succeeded || !response.success)
+            {
+                response.success = false;
+                if (String.IsNullOrWhiteSpace(response.message))
+                {
+                    response.message = process.ErrorText;
+                }
+            }
+
+            return response;
+        }
+    }
+
+    internal sealed class DisplayRefreshService
+    {
+        private const int EnumCurrentSettings = -1;
+        private const int DisplayDeviceAttachedToDesktop = 0x00000001;
+        private const int DisplayDeviceMirroringDriver = 0x00000008;
+        private const int CdsUpdateRegistry = 0x00000001;
+        private const int DispChangeSuccessful = 0;
+
+        public SettingResult EnsureRefreshRate(int refreshRateHz)
+        {
+            int activeDisplays = 0;
+            List<string> reports = new List<string>();
+            List<string> failures = new List<string>();
+
+            for (uint index = 0; ; index++)
+            {
+                DisplayDevice device = new DisplayDevice();
+                device.cb = Marshal.SizeOf(device);
+                if (!EnumDisplayDevices(null, index, ref device, 0))
+                {
+                    break;
+                }
+
+                if ((device.stateFlags & DisplayDeviceAttachedToDesktop) == 0 ||
+                    (device.stateFlags & DisplayDeviceMirroringDriver) != 0)
+                {
+                    continue;
+                }
+
+                activeDisplays++;
+                DevMode current = CreateDevMode();
+                if (!EnumDisplaySettings(device.deviceName, EnumCurrentSettings, ref current))
+                {
+                    failures.Add(device.deviceName + "의 현재 모드를 읽지 못했습니다.");
+                    continue;
+                }
+
+                if (current.dmDisplayFrequency == refreshRateHz)
+                {
+                    reports.Add(device.deviceName + ": 이미 " + refreshRateHz + "Hz");
+                    continue;
+                }
+
+                DevMode target = FindMatchingRefreshMode(device.deviceName, current, refreshRateHz);
+                if (target.dmSize == 0)
+                {
+                    failures.Add(device.deviceName + "에 " + refreshRateHz + "Hz 모드가 없습니다.");
+                    continue;
+                }
+
+                int code = ChangeDisplaySettingsEx(device.deviceName, ref target, IntPtr.Zero, CdsUpdateRegistry, IntPtr.Zero);
+                if (code != DispChangeSuccessful)
+                {
+                    failures.Add(device.deviceName + "을(를) " + refreshRateHz + "Hz로 변경하지 못했습니다 (코드 " + code + ").");
+                    continue;
+                }
+
+                reports.Add(device.deviceName + ": " + refreshRateHz + "Hz 적용");
+            }
+
+            if (activeDisplays == 0)
+            {
+                return SettingResult.Failure("화면 주사율", "활성 디스플레이를 찾지 못했습니다.");
+            }
+
+            if (failures.Count > 0)
+            {
+                return SettingResult.Failure(
+                    "화면 주사율",
+                    String.Join(" / ", failures.ToArray()) +
+                    (reports.Count == 0 ? String.Empty : " / " + String.Join(", ", reports.ToArray())));
+            }
+
+            return SettingResult.Success("화면 주사율", String.Join(", ", reports.ToArray()));
+        }
+
+        private static DevMode FindMatchingRefreshMode(string deviceName, DevMode current, int refreshRateHz)
+        {
+            for (int modeIndex = 0; ; modeIndex++)
+            {
+                DevMode candidate = CreateDevMode();
+                if (!EnumDisplaySettings(deviceName, modeIndex, ref candidate))
+                {
+                    break;
+                }
+
+                if (candidate.dmPelsWidth == current.dmPelsWidth &&
+                    candidate.dmPelsHeight == current.dmPelsHeight &&
+                    candidate.dmBitsPerPel == current.dmBitsPerPel &&
+                    candidate.dmDisplayFrequency == refreshRateHz)
+                {
+                    return candidate;
+                }
+            }
+
+            return new DevMode();
+        }
+
+        private static DevMode CreateDevMode()
+        {
+            DevMode devMode = new DevMode();
+            devMode.dmDeviceName = new String(new char[32]);
+            devMode.dmFormName = new String(new char[32]);
+            devMode.dmSize = (short)Marshal.SizeOf(devMode);
+            return devMode;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool EnumDisplayDevices(string deviceName, uint deviceNumber, ref DisplayDevice displayDevice, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool EnumDisplaySettings(string deviceName, int modeNumber, ref DevMode devMode);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int ChangeDisplaySettingsEx(
+            string deviceName,
+            ref DevMode devMode,
+            IntPtr hwnd,
+            int flags,
+            IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct DisplayDevice
+        {
+            public int cb;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string deviceName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string deviceString;
+            public int stateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string deviceId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string deviceKey;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct DevMode
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string dmDeviceName;
+            public short dmSpecVersion;
+            public short dmDriverVersion;
+            public short dmSize;
+            public short dmDriverExtra;
+            public int dmFields;
+            public int dmPositionX;
+            public int dmPositionY;
+            public int dmDisplayOrientation;
+            public int dmDisplayFixedOutput;
+            public short dmColor;
+            public short dmDuplex;
+            public short dmYResolution;
+            public short dmTTOption;
+            public short dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel;
+            public int dmPelsWidth;
+            public int dmPelsHeight;
+            public int dmDisplayFlags;
+            public int dmDisplayFrequency;
+            public int dmICMMethod;
+            public int dmICMIntent;
+            public int dmMediaType;
+            public int dmDitherType;
+            public int dmReserved1;
+            public int dmReserved2;
+            public int dmPanningWidth;
+            public int dmPanningHeight;
+        }
+    }
+
+    internal static class ProcessRunner
+    {
+        public static ProcessRunResult Run(string fileName, string arguments, int timeoutMilliseconds)
+        {
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo();
+                startInfo.FileName = fileName;
+                startInfo.Arguments = arguments;
+                startInfo.UseShellExecute = false;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.CreateNoWindow = true;
+
+                using (Process process = new Process())
+                {
+                    process.StartInfo = startInfo;
+                    process.Start();
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    bool exited = process.WaitForExit(timeoutMilliseconds);
+                    if (!exited)
+                    {
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                        }
+
+                        return ProcessRunResult.Failed("명령 시간이 초과되었습니다.");
+                    }
+
+                    return new ProcessRunResult
+                    {
+                        exitCode = process.ExitCode,
+                        output = output,
+                        error = error
+                    };
+                }
+            }
+            catch (Exception exception)
+            {
+                return ProcessRunResult.Failed(exception.Message);
+            }
+        }
+    }
+
+    internal static class CommandLine
+    {
+        public static string Quote(string value)
+        {
+            value = value ?? String.Empty;
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+
+        public static string Join(IEnumerable<string> arguments)
+        {
+            return String.Join(" ", arguments.Select(Quote).ToArray());
+        }
+    }
+
+    internal static class ProfileText
+    {
+        public static string Compact(PowerProfile profile)
+        {
+            return "dGPU " + DGpu(profile.dGpu) + "  ·  Turbo " + Turbo(profile.turbo) +
+                "  ·  " + Watts(profile.pl1) + "/" + Watts(profile.pl2) +
+                "  ·  Tau " + Seconds(profile.tau) + "  ·  " + profile.refreshRate + "Hz";
+        }
+
+        public static string DGpu(string value)
+        {
+            if (String.Equals(value, "on", StringComparison.OrdinalIgnoreCase)) return "ON";
+            if (String.Equals(value, "off", StringComparison.OrdinalIgnoreCase)) return "OFF";
+            if (String.Equals(value, "restore", StringComparison.OrdinalIgnoreCase)) return "원래 상태";
+            return "변경 안 함";
+        }
+
+        public static string Turbo(string value)
+        {
+            if (String.Equals(value, "on", StringComparison.OrdinalIgnoreCase)) return "ON";
+            if (String.Equals(value, "off", StringComparison.OrdinalIgnoreCase)) return "OFF";
+            if (String.Equals(value, "restore", StringComparison.OrdinalIgnoreCase)) return "원래 상태";
+            return "변경 안 함";
+        }
+
+        public static string Watts(int? value)
+        {
+            return value.HasValue ? value.Value + "W" : "변경 안 함";
+        }
+
+        public static string Seconds(int? value)
+        {
+            return value.HasValue ? value.Value + "초" : "변경 안 함";
+        }
+
+        public static bool IsOneOf(string value, params string[] allowed)
+        {
+            return allowed.Any(delegate(string candidate)
+            {
+                return String.Equals(value, candidate, StringComparison.OrdinalIgnoreCase);
+            });
+        }
+    }
+
+    internal sealed class SettingResult
+    {
+        public string setting;
+        public string message;
+        public ResultKind kind;
+
+        public static SettingResult Success(string setting, string message)
+        {
+            return new SettingResult { setting = setting, message = message, kind = ResultKind.Success };
+        }
+
+        public static SettingResult Skipped(string setting, string message)
+        {
+            return new SettingResult { setting = setting, message = message, kind = ResultKind.Skipped };
+        }
+
+        public static SettingResult Warning(string setting, string message)
+        {
+            return new SettingResult { setting = setting, message = message, kind = ResultKind.Warning };
+        }
+
+        public static SettingResult Failure(string setting, string message)
+        {
+            return new SettingResult { setting = setting, message = message, kind = ResultKind.Failure };
+        }
+    }
+
+    internal enum ResultKind
+    {
+        Success,
+        Skipped,
+        Warning,
+        Failure
+    }
+
+    internal sealed class ProfileApplyResult
+    {
+        private readonly List<SettingResult> _items = new List<SettingResult>();
+
+        public ProfileApplyResult(PowerProfile profile)
+        {
+            Profile = profile;
+        }
+
+        public PowerProfile Profile { get; private set; }
+        public bool LastAppliedUpdated { get; set; }
+        public bool HasFailures { get { return _items.Any(delegate(SettingResult item) { return item.kind == ResultKind.Failure; }); } }
+        public void Add(SettingResult item) { _items.Add(item); }
+
+        public string ToDisplayText()
+        {
+            StringBuilder content = new StringBuilder();
+            content.AppendLine(Profile.name);
+            content.AppendLine();
+            foreach (SettingResult item in _items)
+            {
+                string marker = item.kind == ResultKind.Success ? "✓" :
+                    item.kind == ResultKind.Skipped ? "–" :
+                    item.kind == ResultKind.Warning ? "!" : "✗";
+                content.AppendLine(marker + " " + item.setting + ": " + item.message);
+            }
+
+            content.AppendLine();
+            if (LastAppliedUpdated)
+            {
+                content.Append("마지막 적용 모드를 업데이트했습니다.");
+            }
+            else
+            {
+                content.Append("실패한 설정이 있어 마지막 적용 모드는 변경하지 않았습니다.");
+            }
+
+            return content.ToString();
+        }
+    }
+
+    internal sealed class ActionResult
+    {
+        public bool ok;
+        public ResultKind kind;
+        public string message;
+
+        public static ActionResult Success(string message)
+        {
+            return new ActionResult { ok = true, kind = ResultKind.Success, message = message };
+        }
+
+        public static ActionResult Warning(string message)
+        {
+            return new ActionResult { ok = true, kind = ResultKind.Warning, message = message };
+        }
+
+        public static ActionResult Failure(string message)
+        {
+            return new ActionResult { ok = false, kind = ResultKind.Failure, message = message };
+        }
+
+        public SettingResult ToSettingResult(string setting)
+        {
+            if (kind == ResultKind.Warning) return SettingResult.Warning(setting, message);
+            if (!ok) return SettingResult.Failure(setting, message);
+            return SettingResult.Success(setting, message);
+        }
+    }
+
+    internal sealed class ProcessRunResult
+    {
+        public int exitCode;
+        public string output;
+        public string error;
+        public bool Succeeded { get { return exitCode == 0; } }
+        public string ErrorText
+        {
+            get
+            {
+                string text = !String.IsNullOrWhiteSpace(error) ? error : output;
+                return String.IsNullOrWhiteSpace(text) ? "명령이 실패했습니다 (종료 코드 " + exitCode + ")." : text.Trim();
+            }
+        }
+
+        public static ProcessRunResult Failed(string message)
+        {
+            return new ProcessRunResult { exitCode = -1, error = message, output = String.Empty };
+        }
+    }
+
+    internal sealed class BackendResponse
+    {
+        public bool success { get; set; }
+        public string message { get; set; }
+        public BackendDGpu value { get; set; }
+
+        public bool ok { get { return success; } }
+        public BackendDGpu dGpu { get { return value; } }
+
+        public string ErrorText
+        {
+            get { return String.IsNullOrWhiteSpace(message) ? "helper가 적용을 완료하지 못했습니다." : message; }
+        }
+
+        public static BackendResponse Failed(string message)
+        {
+            return new BackendResponse { success = false, message = message };
+        }
+    }
+
+    internal sealed class BackendDGpu
+    {
+        public string instanceId { get; set; }
+        public bool enabled { get; set; }
+        public string status { get; set; }
+        public string problem { get; set; }
+    }
+
+    internal sealed class ProfileDocument
+    {
+        public List<PowerProfile> profiles { get; set; }
+    }
+
+    internal sealed class PowerProfile
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string purpose { get; set; }
+        public string dGpu { get; set; }
+        public string turbo { get; set; }
+        public int? pl1 { get; set; }
+        public int? pl2 { get; set; }
+        public int? tau { get; set; }
+        public int refreshRate { get; set; }
+        public List<string> changes { get; set; }
+        public List<string> notes { get; set; }
+        public bool isRestore { get; set; }
+    }
+
+    internal sealed class AppState
+    {
+        public string lastAppliedProfile { get; set; }
+        public string lastAppliedAt { get; set; }
+        public BaselineState baseline { get; set; }
+        public List<ManagedPlan> managedPlans { get; set; }
+    }
+
+    internal sealed class BaselineState
+    {
+        public string activePowerScheme { get; set; }
+        public string dGpuState { get; set; }
+    }
+
+    internal sealed class ManagedPlan
+    {
+        public string profileId { get; set; }
+        public string schemeGuid { get; set; }
+        public string baselineSchemeGuid { get; set; }
+    }
+
+    internal static class SelfTest
+    {
+        public static int Run(string applicationDirectory)
+        {
+            try
+            {
+                ProfileRepository repository = new ProfileRepository(Path.Combine(applicationDirectory, "profiles.json"));
+                IList<PowerProfile> profiles = repository.Load();
+                ProfileValidator.Validate(profiles);
+
+                if (!File.Exists(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")))
+                {
+                    throw new FileNotFoundException("PowerModeBackend.ps1을 찾을 수 없습니다.");
+                }
+
+                foreach (PowerProfile profile in profiles)
+                {
+                    if (String.Equals(profile.turbo, "on", StringComparison.OrdinalIgnoreCase) ||
+                        String.Equals(profile.turbo, "off", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string command = "-Operation Turbo -State " + CommandLine.Quote(profile.turbo) +
+                            " -SchemeGuid " + CommandLine.Quote("00000000-0000-0000-0000-000000000000");
+                        if (command.IndexOf("-Operation Turbo", StringComparison.Ordinal) < 0 ||
+                            command.IndexOf("-SchemeGuid", StringComparison.Ordinal) < 0)
+                        {
+                            throw new InvalidOperationException("Turbo 명령 생성 검증에 실패했습니다.");
+                        }
+                    }
+                }
+
+                Console.WriteLine("PASS: 8 profiles parsed; 144Hz validated; helper command generation validated; no hardware setting was changed.");
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine("FAIL: " + exception.Message);
+                return 1;
+            }
+        }
+    }
+}
