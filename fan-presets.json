@@ -1,0 +1,44 @@
+{
+  "modelName": "MSI GP66 Leopard 11UG",
+  "systemProductName": "GP66 Leopard 11UG",
+  "baseBoardProduct": "MS-1543",
+  "firmwareId": "1543EMS1.115",
+  "temperaturePoints": [0, 50, 60, 70, 80, 90],
+  "presets": [
+    {
+      "id": "quiet",
+      "name": "무음 곡선",
+      "description": "낮은 온도에서는 조용하게, 90°C에서는 100%까지 상승",
+      "cpuSpeeds": [0, 0, 20, 40, 65, 100],
+      "gpuSpeeds": [0, 0, 25, 45, 70, 100]
+    },
+    {
+      "id": "curve-20",
+      "name": "20% 곡선",
+      "description": "50°C부터 20%를 목표로 하는 저소음 곡선",
+      "cpuSpeeds": [0, 20, 30, 45, 70, 100],
+      "gpuSpeeds": [0, 20, 35, 50, 75, 100]
+    },
+    {
+      "id": "curve-50",
+      "name": "50% 곡선",
+      "description": "일반 작업·개발용 균형 곡선",
+      "cpuSpeeds": [0, 50, 60, 75, 90, 100],
+      "gpuSpeeds": [0, 50, 65, 80, 95, 100]
+    },
+    {
+      "id": "curve-70",
+      "name": "70% 곡선",
+      "description": "고부하 작업·게임용 적극 냉각 곡선",
+      "cpuSpeeds": [0, 70, 80, 90, 100, 100],
+      "gpuSpeeds": [0, 70, 85, 95, 100, 100]
+    },
+    {
+      "id": "curve-90",
+      "name": "90% 곡선",
+      "description": "낮은 온도부터 높은 냉각을 우선하는 곡선",
+      "cpuSpeeds": [0, 90, 95, 100, 100, 100],
+      "gpuSpeeds": [0, 90, 95, 100, 100, 100]
+    }
+  ]
+}

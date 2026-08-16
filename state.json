@@ -5,5 +5,10 @@
     "activePowerScheme": null,
     "dGpuState": null
   },
-  "managedPlans": []
+  "managedPlans": [],
+  "fan": {
+    "lastAppliedPreset": null,
+    "lastAppliedAt": null,
+    "baseline": null
+  }
 }

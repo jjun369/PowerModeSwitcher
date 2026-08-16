@@ -53,17 +53,26 @@ namespace PowerModeSwitcher
         private readonly ProfileRepository _profileRepository;
         private readonly StateRepository _stateRepository;
         private readonly PowerModeService _powerModeService;
+        private readonly FanPresetRepository _fanPresetRepository;
         private readonly List<Button> _applyButtons = new List<Button>();
+        private readonly List<Control> _fanActionControls = new List<Control>();
         private Label _lastAppliedLabel;
         private Label _workingLabel;
         private TableLayoutPanel _cardGrid;
+        private TabPage _fanTab;
+        private Label _fanStatusLabel;
+        private Label _fanReadbackLabel;
+        private Label _fanPresetLabel;
         private IList<PowerProfile> _profiles;
+        private FanPresetDocument _fanPresetDocument;
+        private FanService _fanService;
 
         public MainForm(string applicationDirectory)
         {
             _applicationDirectory = applicationDirectory;
             _profileRepository = new ProfileRepository(Path.Combine(applicationDirectory, "profiles.json"));
             _stateRepository = new StateRepository(Path.Combine(applicationDirectory, "state.json"));
+            _fanPresetRepository = new FanPresetRepository(Path.Combine(applicationDirectory, "fan-presets.json"));
             _powerModeService = new PowerModeService(
                 _stateRepository,
                 new BackendClient(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")),
@@ -142,11 +151,24 @@ namespace PowerModeSwitcher
                 _workingLabel.Left = Math.Max(14, statusPanel.ClientSize.Width - _workingLabel.Width - 14);
             };
 
+            TabControl tabs = new TabControl();
+            tabs.Dock = DockStyle.Fill;
+            tabs.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
+            outer.Controls.Add(tabs, 0, 2);
+
+            TabPage profilesTab = new TabPage("전원 모드 (8)");
+            profilesTab.BackColor = Color.FromArgb(242, 245, 248);
+            tabs.TabPages.Add(profilesTab);
+
+            _fanTab = new TabPage("팬 제어 (실험적)");
+            _fanTab.BackColor = Color.FromArgb(242, 245, 248);
+            tabs.TabPages.Add(_fanTab);
+
             Panel scrollHost = new Panel();
             scrollHost.Dock = DockStyle.Fill;
             scrollHost.AutoScroll = true;
             scrollHost.Padding = new Padding(0, 14, 0, 0);
-            outer.Controls.Add(scrollHost, 0, 2);
+            profilesTab.Controls.Add(scrollHost);
 
             _cardGrid = new TableLayoutPanel();
             _cardGrid.AutoSize = true;
@@ -166,6 +188,7 @@ namespace PowerModeSwitcher
                 ProfileValidator.Validate(_profiles);
                 RenderCards();
                 RefreshLastAppliedLabel();
+                InitializeFanControl();
             }
             catch (Exception exception)
             {
@@ -176,6 +199,293 @@ namespace PowerModeSwitcher
                     MessageBoxIcon.Error);
                 Close();
             }
+        }
+
+        private void InitializeFanControl()
+        {
+            try
+            {
+                _fanPresetDocument = _fanPresetRepository.Load();
+                _fanService = new FanService(_stateRepository, _fanPresetDocument);
+                BuildFanTab();
+                RefreshFanStatus();
+            }
+            catch (Exception exception)
+            {
+                BuildFanUnavailable(exception.Message);
+            }
+        }
+
+        private void BuildFanUnavailable(string message)
+        {
+            _fanTab.Controls.Clear();
+            Label unavailable = new Label();
+            unavailable.Dock = DockStyle.Fill;
+            unavailable.Padding = new Padding(24);
+            unavailable.Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
+            unavailable.ForeColor = Color.FromArgb(120, 60, 20);
+            unavailable.Text = "팬 제어 설정을 읽지 못했습니다.\r\n\r\n" + message;
+            _fanTab.Controls.Add(unavailable);
+        }
+
+        private void BuildFanTab()
+        {
+            _fanTab.Controls.Clear();
+            _fanActionControls.Clear();
+
+            Panel scroll = new Panel();
+            scroll.Dock = DockStyle.Fill;
+            scroll.AutoScroll = true;
+            _fanTab.Controls.Add(scroll);
+
+            FlowLayoutPanel stack = new FlowLayoutPanel();
+            stack.AutoSize = true;
+            stack.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            stack.Dock = DockStyle.Top;
+            stack.FlowDirection = FlowDirection.TopDown;
+            stack.WrapContents = false;
+            stack.Padding = new Padding(18, 18, 18, 24);
+            scroll.Controls.Add(stack);
+
+            Label heading = new Label();
+            heading.AutoSize = true;
+            heading.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point);
+            heading.ForeColor = Color.FromArgb(31, 53, 73);
+            heading.Margin = new Padding(0, 0, 0, 8);
+            heading.Text = "팬 제어 · 실험적 MSI_ACPI WMI";
+            stack.Controls.Add(heading);
+
+            Label warning = new Label();
+            warning.AutoSize = false;
+            warning.BackColor = Color.FromArgb(255, 245, 209);
+            warning.BorderStyle = BorderStyle.FixedSingle;
+            warning.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            warning.ForeColor = Color.FromArgb(106, 73, 20);
+            warning.Margin = new Padding(0, 0, 0, 12);
+            warning.Padding = new Padding(12, 9, 12, 9);
+            warning.Size = new Size(1040, 66);
+            warning.Text = "비공식 모델 전용 제어입니다. 감지 펌웨어가 " + _fanPresetDocument.firmwareId +
+                "와 일치할 때만 쓰기가 활성화됩니다. MSI Center/Fn 키/절전 모드는 설정을 덮어쓸 수 있습니다. " +
+                "20·50·70·90%는 고정 속도가 아니라 고온에서 100%까지 올라가는 안전 팬 곡선입니다.";
+            stack.Controls.Add(warning);
+
+            GroupBox statusGroup = new GroupBox();
+            statusGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
+            statusGroup.Margin = new Padding(0, 0, 0, 12);
+            statusGroup.Padding = new Padding(14, 20, 14, 10);
+            statusGroup.Size = new Size(1040, 126);
+            statusGroup.Text = "현재 상태 (수동 새로고침)";
+            stack.Controls.Add(statusGroup);
+
+            _fanStatusLabel = new Label();
+            _fanStatusLabel.AutoSize = false;
+            _fanStatusLabel.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            _fanStatusLabel.ForeColor = Color.FromArgb(42, 67, 90);
+            _fanStatusLabel.Location = new Point(15, 25);
+            _fanStatusLabel.Size = new Size(820, 24);
+            _fanStatusLabel.Text = "팬 backend 상태를 확인하는 중…";
+            statusGroup.Controls.Add(_fanStatusLabel);
+
+            _fanReadbackLabel = new Label();
+            _fanReadbackLabel.AutoSize = false;
+            _fanReadbackLabel.Font = new Font("Consolas", 8.5F, FontStyle.Regular, GraphicsUnit.Point);
+            _fanReadbackLabel.ForeColor = Color.FromArgb(73, 89, 105);
+            _fanReadbackLabel.Location = new Point(15, 51);
+            _fanReadbackLabel.Size = new Size(1005, 54);
+            _fanReadbackLabel.Text = "읽기 전용 상태 확인 전";
+            statusGroup.Controls.Add(_fanReadbackLabel);
+
+            Button refresh = CreateFanButton("새로고침", delegate { RefreshFanStatus(); }, false);
+            refresh.Location = new Point(855, 22);
+            refresh.Size = new Size(165, 32);
+            statusGroup.Controls.Add(refresh);
+
+            GroupBox presetsGroup = new GroupBox();
+            presetsGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
+            presetsGroup.Margin = new Padding(0, 0, 0, 12);
+            presetsGroup.Padding = new Padding(14, 20, 14, 10);
+            presetsGroup.Size = new Size(1040, 154);
+            presetsGroup.Text = "안전 팬 곡선";
+            stack.Controls.Add(presetsGroup);
+
+            Label presetHint = new Label();
+            presetHint.AutoSize = false;
+            presetHint.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            presetHint.ForeColor = Color.FromArgb(79, 93, 108);
+            presetHint.Location = new Point(15, 24);
+            presetHint.Size = new Size(1000, 25);
+            presetHint.Text = "버튼을 누르면 즉시 적용됩니다. 곡선 편집 중에도 온도가 높아지면 마지막 포인트에서 100%가 됩니다.";
+            presetsGroup.Controls.Add(presetHint);
+
+            FlowLayoutPanel presetButtons = new FlowLayoutPanel();
+            presetButtons.Location = new Point(15, 54);
+            presetButtons.Size = new Size(1005, 42);
+            presetButtons.WrapContents = false;
+            presetsGroup.Controls.Add(presetButtons);
+
+            presetButtons.Controls.Add(CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(); }, true); }, false));
+            foreach (FanPreset preset in _fanPresetDocument.presets)
+            {
+                FanPreset selectedPreset = preset;
+                presetButtons.Controls.Add(CreateFanButton(selectedPreset.name, delegate
+                {
+                    RunFanOperation(selectedPreset.name + " 적용 중…", delegate { return _fanService.ApplyPreset(selectedPreset); }, true);
+                }, selectedPreset.id == "curve-50"));
+            }
+
+            _fanPresetLabel = new Label();
+            _fanPresetLabel.AutoSize = false;
+            _fanPresetLabel.Font = new Font("Segoe UI", 8.5F, FontStyle.Italic, GraphicsUnit.Point);
+            _fanPresetLabel.ForeColor = Color.FromArgb(91, 105, 120);
+            _fanPresetLabel.Location = new Point(15, 105);
+            _fanPresetLabel.Size = new Size(1000, 25);
+            _fanPresetLabel.Text = "프리셋 값은 fan-presets.json에서 조정할 수 있습니다.";
+            presetsGroup.Controls.Add(_fanPresetLabel);
+
+            GroupBox boostGroup = new GroupBox();
+            boostGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
+            boostGroup.Margin = new Padding(0, 0, 0, 12);
+            boostGroup.Padding = new Padding(14, 20, 14, 10);
+            boostGroup.Size = new Size(1040, 78);
+            boostGroup.Text = "Cooler Boost";
+            stack.Controls.Add(boostGroup);
+
+            Label boostHint = new Label();
+            boostHint.AutoSize = false;
+            boostHint.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            boostHint.ForeColor = Color.FromArgb(79, 93, 108);
+            boostHint.Location = new Point(15, 29);
+            boostHint.Size = new Size(580, 28);
+            boostHint.Text = "최대 팬 강제 모드입니다. 해제 후 감속에는 시간이 걸릴 수 있습니다.";
+            boostGroup.Controls.Add(boostHint);
+
+            Button boostOn = CreateFanButton("Cooler Boost 최대", delegate
+            {
+                RunFanOperation("Cooler Boost 적용 중…", delegate { return _fanService.SetCoolerBoost(true); }, true);
+            }, true);
+            boostOn.Location = new Point(612, 25);
+            boostOn.Size = new Size(190, 32);
+            boostGroup.Controls.Add(boostOn);
+
+            Button boostOff = CreateFanButton("Boost 해제", delegate
+            {
+                RunFanOperation("Cooler Boost 해제 중…", delegate { return _fanService.SetCoolerBoost(false); }, false);
+            }, false);
+            boostOff.Location = new Point(816, 25);
+            boostOff.Size = new Size(204, 32);
+            boostGroup.Controls.Add(boostOff);
+
+            GroupBox restoreGroup = new GroupBox();
+            restoreGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
+            restoreGroup.Margin = new Padding(0, 0, 0, 12);
+            restoreGroup.Padding = new Padding(14, 20, 14, 10);
+            restoreGroup.Size = new Size(1040, 78);
+            restoreGroup.Text = "복원";
+            stack.Controls.Add(restoreGroup);
+
+            Label restoreHint = new Label();
+            restoreHint.AutoSize = false;
+            restoreHint.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            restoreHint.ForeColor = Color.FromArgb(79, 93, 108);
+            restoreHint.Location = new Point(15, 29);
+            restoreHint.Size = new Size(700, 28);
+            restoreHint.Text = "처음 쓰기 전에 저장한 팬 모드·곡선·Cooler Boost 상태를 복원합니다.";
+            restoreGroup.Controls.Add(restoreHint);
+
+            Button restore = CreateFanButton("최초 팬 설정 복원", delegate
+            {
+                RunFanOperation("팬 baseline 복원 중…", delegate { return _fanService.RestoreBaseline(); }, false);
+            }, false);
+            restore.Location = new Point(730, 25);
+            restore.Size = new Size(290, 32);
+            restoreGroup.Controls.Add(restore);
+        }
+
+        private Button CreateFanButton(string text, Action action, bool primary)
+        {
+            Button button = new Button();
+            button.AutoSize = true;
+            button.BackColor = primary ? Color.FromArgb(40, 103, 160) : Color.White;
+            button.FlatAppearance.BorderColor = Color.FromArgb(154, 169, 184);
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatStyle = FlatStyle.Flat;
+            button.ForeColor = primary ? Color.White : Color.FromArgb(48, 72, 95);
+            button.Margin = new Padding(0, 0, 8, 0);
+            button.Padding = new Padding(10, 3, 10, 3);
+            button.Text = text;
+            button.UseVisualStyleBackColor = false;
+            button.Click += delegate { action(); };
+            _fanActionControls.Add(button);
+            return button;
+        }
+
+        private void RefreshFanStatus()
+        {
+            RunFanOperation("팬 상태 확인 중…", delegate { return _fanService.Query(); }, false);
+        }
+
+        private void RunFanOperation(string workingMessage, Func<FanActionResult> operation, bool showResult)
+        {
+            if (_fanService == null)
+            {
+                return;
+            }
+
+            SetBusy(true, workingMessage);
+            Task<FanActionResult> task = Task.Factory.StartNew(operation);
+            task.ContinueWith(delegate(Task<FanActionResult> completedTask)
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    SetBusy(false, String.Empty);
+                    if (completedTask.IsFaulted)
+                    {
+                        Exception exception = completedTask.Exception == null ? null : completedTask.Exception.GetBaseException();
+                        MessageBox.Show(
+                            "팬 제어 중 예기치 않은 오류가 발생했습니다.\r\n\r\n" +
+                            (exception == null ? "알 수 없는 오류" : exception.Message),
+                            "PowerModeSwitcher",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    FanActionResult result = completedTask.Result;
+                    UpdateFanStatus(result.status);
+                    if (showResult || !result.success)
+                    {
+                        MessageBox.Show(
+                            result.ToDisplayText(),
+                            result.title,
+                            MessageBoxButtons.OK,
+                            result.success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    }
+                });
+            });
+        }
+
+        private void UpdateFanStatus(FanHardwareStatus status)
+        {
+            if (_fanStatusLabel == null || _fanReadbackLabel == null)
+            {
+                return;
+            }
+
+            if (status == null)
+            {
+                _fanStatusLabel.Text = "팬 상태를 읽지 못했습니다.";
+                _fanReadbackLabel.Text = "MSI Center에서 Auto 또는 Cooler Boost 상태를 확인하세요.";
+                return;
+            }
+
+            _fanStatusLabel.Text = (status.writeEnabled ? "쓰기 가능: " : "쓰기 잠금: ") + status.message;
+            _fanStatusLabel.ForeColor = status.writeEnabled ? Color.FromArgb(31, 102, 66) : Color.FromArgb(145, 72, 24);
+            _fanReadbackLabel.Text = "펌웨어 " + (status.firmware ?? "확인 불가") + " · " + FanText.Mode(status.fanMode) +
+                " · Cooler Boost " + (status.coolerBoost ? "ON" : "OFF") + "\r\n" +
+                "CPU " + status.cpuTemperature + "°C / " + status.cpuDuty + "% / " + status.cpuRpm + " RPM · " +
+                "GPU " + status.gpuTemperature + "°C / " + status.gpuDuty + "% / " + status.gpuRpm + " RPM\r\n" +
+                "CPU 곡선: " + FanText.Curve(status.cpuTemperatures, status.cpuSpeeds) + "\r\n" +
+                "GPU 곡선: " + FanText.Curve(status.gpuTemperatures, status.gpuSpeeds);
         }
 
         private void RenderCards()
@@ -361,6 +671,11 @@ namespace PowerModeSwitcher
                 button.Enabled = !busy;
             }
 
+            foreach (Control control in _fanActionControls)
+            {
+                control.Enabled = !busy;
+            }
+
             _workingLabel.Text = message;
             _workingLabel.Left = Math.Max(14, _workingLabel.Parent.ClientSize.Width - _workingLabel.Width - 14);
             UseWaitCursor = busy;
@@ -449,6 +764,7 @@ namespace PowerModeSwitcher
 
             state = state ?? new AppState();
             state.managedPlans = state.managedPlans ?? new List<ManagedPlan>();
+            state.fan = state.fan ?? new FanState();
             return state;
         }
 
@@ -456,6 +772,7 @@ namespace PowerModeSwitcher
         {
             state = state ?? new AppState();
             state.managedPlans = state.managedPlans ?? new List<ManagedPlan>();
+            state.fan = state.fan ?? new FanState();
             string temporaryPath = _path + ".tmp";
             File.WriteAllText(temporaryPath, _serializer.Serialize(state), new UTF8Encoding(false));
             File.Copy(temporaryPath, _path, true);
@@ -1364,6 +1681,7 @@ namespace PowerModeSwitcher
         public string lastAppliedAt { get; set; }
         public BaselineState baseline { get; set; }
         public List<ManagedPlan> managedPlans { get; set; }
+        public FanState fan { get; set; }
     }
 
     internal sealed class BaselineState
@@ -1388,6 +1706,9 @@ namespace PowerModeSwitcher
                 ProfileRepository repository = new ProfileRepository(Path.Combine(applicationDirectory, "profiles.json"));
                 IList<PowerProfile> profiles = repository.Load();
                 ProfileValidator.Validate(profiles);
+                FanPresetRepository fanRepository = new FanPresetRepository(Path.Combine(applicationDirectory, "fan-presets.json"));
+                FanPresetDocument fanPresets = fanRepository.Load();
+                FanPresetValidator.Validate(fanPresets);
 
                 if (!File.Exists(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")))
                 {
@@ -1409,7 +1730,7 @@ namespace PowerModeSwitcher
                     }
                 }
 
-                Console.WriteLine("PASS: 8 profiles parsed; 144Hz validated; helper command generation validated; no hardware setting was changed.");
+                Console.WriteLine("PASS: 8 profiles and fan curves parsed; 144Hz and fan safety constraints validated; no hardware setting was changed.");
                 return 0;
             }
             catch (Exception exception)
