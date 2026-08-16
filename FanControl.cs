@@ -230,7 +230,7 @@ namespace PowerModeSwitcher
             int index;
             for (index = 0; index < temperatures.Length; index++)
             {
-                points.Add(temperatures[index] + "°C→" + speeds[index] + "%");
+                points.Add(temperatures[index] + "°C→" + speeds[index] + (speeds[index] <= 100 ? "%" : " (EC 원시값)"));
             }
 
             return String.Join(" · ", points.ToArray());
@@ -951,19 +951,12 @@ namespace PowerModeSwitcher
 
         private static bool HasPlausibleSpeeds(int[] values)
         {
-            if (values == null || values.Length != 6 || values[0] != 0 ||
-                !values.All(delegate(int value) { return value >= 0 && value <= 100; }))
-            {
-                return false;
-            }
-
-            int index;
-            for (index = 1; index < values.Length; index++)
-            {
-                if (values[index] < values[index - 1]) return false;
-            }
-
-            return true;
+            // MSI Center's saved factory/advanced table can contain EC-native values
+            // above 100. User presets stay constrained to monotonic 0..100 percent;
+            // this readback check only decides whether the current table is safe to
+            // snapshot and restore byte-for-byte.
+            return values != null && values.Length == 6 &&
+                values.All(delegate(int value) { return value >= 0 && value <= 255; });
         }
 
         private static bool IsKnownFanMode(int value)
