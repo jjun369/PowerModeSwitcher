@@ -37,15 +37,14 @@ namespace PowerModeSwitcher
         {
             if (document == null || String.IsNullOrWhiteSpace(document.modelName) ||
                 String.IsNullOrWhiteSpace(document.systemProductName) || String.IsNullOrWhiteSpace(document.baseBoardProduct) ||
-                String.IsNullOrWhiteSpace(document.firmwareId) || document.temperaturePoints == null ||
+                document.temperaturePoints == null ||
                 document.presets == null || document.presets.Count == 0)
             {
                 throw new InvalidDataException("fan-presets.json의 필수 항목이 없습니다.");
             }
 
             if (!String.Equals(document.systemProductName, FanHardwareGate.SystemProductName, StringComparison.Ordinal) ||
-                !String.Equals(document.baseBoardProduct, FanHardwareGate.BaseBoardProduct, StringComparison.Ordinal) ||
-                !String.Equals(document.firmwareId, FanHardwareGate.FirmwareId, StringComparison.Ordinal))
+                !String.Equals(document.baseBoardProduct, FanHardwareGate.BaseBoardProduct, StringComparison.Ordinal))
             {
                 throw new InvalidDataException("fan-presets.json의 하드웨어 식별값은 이 EXE가 지원하는 GP66 11UG 검증값과 일치해야 합니다.");
             }
@@ -115,7 +114,6 @@ namespace PowerModeSwitcher
     {
         public const string SystemProductName = "GP66 Leopard 11UG";
         public const string BaseBoardProduct = "MS-1543";
-        public const string FirmwareId = "1543EMS1.115";
     }
 
     internal sealed class FanPresetDocument
@@ -123,7 +121,6 @@ namespace PowerModeSwitcher
         public string modelName { get; set; }
         public string systemProductName { get; set; }
         public string baseBoardProduct { get; set; }
-        public string firmwareId { get; set; }
         public int[] temperaturePoints { get; set; }
         public List<FanPreset> presets { get; set; }
     }
@@ -486,13 +483,6 @@ namespace PowerModeSwitcher
                         return status;
                     }
 
-                    if (!FirmwareMatches(firmware))
-                    {
-                        status.writeEnabled = false;
-                        status.message = "이 팬 backend는 " + FanHardwareGate.FirmwareId + " EC 펌웨어에서만 활성화됩니다. 감지값: " + (firmware ?? "없음");
-                        return status;
-                    }
-
                     status.fanMode = ReadByteWith(instance, package, FanModeAddress);
                     status.coolerBoost = (ReadByteWith(instance, package, CoolerBoostAddress) & CoolerBoostMask) != 0;
                     status.cpuTemperature = ReadByteWith(instance, package, CpuTemperatureAddress);
@@ -507,7 +497,7 @@ namespace PowerModeSwitcher
                     status.gpuSpeeds = ReadRange(instance, package, 0x8A);
                     status.writeEnabled = HasPlausibleCurve(status);
                     status.message = status.writeEnabled
-                        ? "MSI_ACPI WMI, 모델, 보드, EC 펌웨어, 팬 곡선 검증 완료 (읽기/쓰기 가능)."
+                        ? "MSI_ACPI WMI, 모델, 보드와 팬 곡선 검증 완료 (읽기/쓰기 가능)."
                         : "팬 모드 또는 곡선 읽기값이 안전 검증을 통과하지 않아 쓰기를 잠갔습니다.";
                     return status;
                 });
@@ -910,12 +900,6 @@ namespace PowerModeSwitcher
             return identity != null &&
                 String.Equals(identity.systemProductName, FanHardwareGate.SystemProductName, StringComparison.OrdinalIgnoreCase) &&
                 String.Equals(identity.baseBoardProduct, FanHardwareGate.BaseBoardProduct, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool FirmwareMatches(string firmware)
-        {
-            return !String.IsNullOrWhiteSpace(firmware) &&
-                String.Equals(firmware, FanHardwareGate.FirmwareId, StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool HasPlausibleCurve(FanHardwareStatus status)

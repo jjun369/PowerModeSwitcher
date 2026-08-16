@@ -2,7 +2,6 @@
   "modelName": "MSI GP66 Leopard 11UG",
   "systemProductName": "GP66 Leopard 11UG",
   "baseBoardProduct": "MS-1543",
-  "firmwareId": "1543EMS1.115",
   "temperaturePoints": [0, 50, 60, 70, 80, 90],
   "presets": [
     {
