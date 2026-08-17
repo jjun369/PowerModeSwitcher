@@ -34,6 +34,9 @@ namespace PowerModeSwitcher
 
     internal static class FanPresetValidator
     {
+        private const int MaxPresetFanLevel = 150;
+        private const int MinFinalPresetFanLevel = 100;
+
         public static void Validate(FanPresetDocument document)
         {
             if (document == null || String.IsNullOrWhiteSpace(document.modelName) ||
@@ -112,17 +115,19 @@ namespace PowerModeSwitcher
 
         private static void ValidateSpeeds(int[] values, string fanName, string presetId)
         {
-            if (values == null || values.Length != 6 || values[0] != 0 || values[5] != 100)
+            if (values == null || values.Length != 6 || values[0] != 0 ||
+                values[5] < MinFinalPresetFanLevel || values[5] > MaxPresetFanLevel)
             {
-                throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0%로 시작해 100%로 끝나는 6개 포인트여야 합니다.");
+                throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0으로 시작하고 마지막 값이 100~150인 6개 포인트여야 합니다.");
             }
 
             int index;
             for (index = 0; index < values.Length; index++)
             {
-                if (values[index] < 0 || values[index] > 100 || (index > 0 && values[index] < values[index - 1]))
+                if (values[index] < 0 || values[index] > MaxPresetFanLevel ||
+                    (index > 0 && values[index] < values[index - 1]))
                 {
-                    throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0~100 범위에서 감소하지 않아야 합니다.");
+                    throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0~150 범위에서 감소하지 않아야 합니다.");
                 }
             }
         }
@@ -1019,10 +1024,9 @@ namespace PowerModeSwitcher
 
         private static bool HasPlausibleSpeeds(int[] values)
         {
-            // MSI Center's saved factory/advanced table can contain EC-native values
-            // above 100. User presets stay constrained to monotonic 0..100 percent;
-            // this readback check only decides whether the current table is safe to
-            // snapshot and restore byte-for-byte.
+            // MSI Center's saved factory/advanced table uses EC-native values above
+            // 100 (this GP66 family reaches 150). Readback accepts the full byte
+            // range because it also snapshots/restores OEM values byte-for-byte.
             return values != null && values.Length == 6 &&
                 values.All(delegate(int value) { return value >= 0 && value <= 255; });
         }

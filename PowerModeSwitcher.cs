@@ -270,7 +270,7 @@ namespace PowerModeSwitcher
             warning.Size = new Size(1040, 66);
             warning.Text = "비공식 " + _fanPresetDocument.systemProductName + " / " + _fanPresetDocument.baseBoardProduct +
                 " 전용 제어입니다. 모델·보드와 현재 팬 곡선이 확인될 때만 쓰기가 활성화됩니다. MSI Center/Fn 키/절전 모드는 설정을 덮어쓸 수 있습니다. " +
-                "20·50·70·99%는 팬 속도 곡선이며 90°C에서는 100%로 올라갑니다. Cooler Boost는 별도 강제 최대 모드입니다.";
+                "20·50·70·99%는 일반 곡선, 110·120·125%는 EC 확장 레벨 실험값입니다. Cooler Boost는 별도 강제 최대 모드입니다.";
             stack.Controls.Add(warning);
 
             GroupBox statusGroup = new GroupBox();
@@ -308,7 +308,7 @@ namespace PowerModeSwitcher
             presetsGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
             presetsGroup.Margin = new Padding(0, 0, 0, 12);
             presetsGroup.Padding = new Padding(14, 20, 14, 10);
-            presetsGroup.Size = new Size(1040, 154);
+            presetsGroup.Size = new Size(1040, 190);
             presetsGroup.Text = "안전 팬 곡선";
             stack.Controls.Add(presetsGroup);
 
@@ -318,13 +318,13 @@ namespace PowerModeSwitcher
             presetHint.ForeColor = Color.FromArgb(79, 93, 108);
             presetHint.Location = new Point(15, 24);
             presetHint.Size = new Size(1000, 25);
-            presetHint.Text = "버튼을 누르면 EC 곡선표에 적용됩니다. 현재 팬 RPM은 온도 컨트롤러가 재평가한 뒤 1~3초 안에 변합니다. 최대 회전은 Cooler Boost를 사용하세요.";
+            presetHint.Text = "버튼을 누르면 EC 곡선표에 적용됩니다. 110~125%는 Cooler Boost보다 낮은 중간 회전을 찾기 위한 실험 레벨입니다.";
             presetsGroup.Controls.Add(presetHint);
 
             FlowLayoutPanel presetButtons = new FlowLayoutPanel();
             presetButtons.Location = new Point(15, 54);
-            presetButtons.Size = new Size(1005, 42);
-            presetButtons.WrapContents = false;
+            presetButtons.Size = new Size(1005, 76);
+            presetButtons.WrapContents = true;
             presetsGroup.Controls.Add(presetButtons);
 
             _fanAutoButton = CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(); }, true); }, false);
@@ -344,7 +344,7 @@ namespace PowerModeSwitcher
             _fanPresetLabel.AutoSize = false;
             _fanPresetLabel.Font = new Font("Segoe UI", 8.5F, FontStyle.Italic, GraphicsUnit.Point);
             _fanPresetLabel.ForeColor = Color.FromArgb(91, 105, 120);
-            _fanPresetLabel.Location = new Point(15, 105);
+            _fanPresetLabel.Location = new Point(15, 137);
             _fanPresetLabel.Size = new Size(1000, 25);
             _fanPresetLabel.Text = "프리셋 값은 fan-presets.json에서 조정할 수 있습니다.";
             presetsGroup.Controls.Add(_fanPresetLabel);
