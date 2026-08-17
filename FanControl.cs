@@ -160,6 +160,7 @@ namespace PowerModeSwitcher
         public string baseBoardProduct { get; set; }
         public string firmware { get; set; }
         public string message { get; set; }
+        public int shiftMode { get; set; }
         public int fanMode { get; set; }
         public bool coolerBoost { get; set; }
         public int cpuTemperature { get; set; }
@@ -184,6 +185,7 @@ namespace PowerModeSwitcher
     internal sealed class FanBaselineState
     {
         public string firmware { get; set; }
+        public int shiftMode { get; set; }
         public int fanMode { get; set; }
         public bool coolerBoost { get; set; }
         public int[] cpuTemperatures { get; set; }
@@ -217,6 +219,7 @@ namespace PowerModeSwitcher
             {
                 text.AppendLine();
                 text.Append("펌웨어: ").AppendLine(String.IsNullOrWhiteSpace(status.firmware) ? "확인 불가" : status.firmware);
+                text.Append("시나리오: ").AppendLine(FanText.Shift(status.shiftMode));
                 text.Append("팬 모드: ").AppendLine(FanText.Mode(status.fanMode));
                 text.Append("Cooler Boost: ").AppendLine(status.coolerBoost ? "ON" : "OFF");
                 text.Append("CPU: ").Append(status.cpuTemperature).Append("°C / ").Append(status.cpuDuty).Append("% / ").Append(status.cpuRpm).AppendLine(" RPM");
@@ -234,6 +237,14 @@ namespace PowerModeSwitcher
             if (value == 0x0D) return "Auto / 기본";
             if (value == 0x1D) return "MSI Silent";
             if (value == 0x8D) return "Advanced 곡선";
+            return "알 수 없음 (0x" + value.ToString("X2") + ")";
+        }
+
+        public static string Shift(int value)
+        {
+            if (value == 0xC1) return "Balanced / User";
+            if (value == 0xC2) return "Super Battery";
+            if (value == 0xC4) return "Extreme Performance";
             return "알 수 없음 (0x" + value.ToString("X2") + ")";
         }
 
@@ -300,7 +311,7 @@ namespace PowerModeSwitcher
                         Copy(before.gpuTemperatures),
                         preset.gpuSpeeds);
                     Remember(preset.id);
-                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) 적용했습니다. 현재 온도 포인트를 유지하고 EC 속도 레벨만 교체했습니다. 팬 RPM은 1~3초 후 안정됩니다.", after);
+                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) Extreme 시나리오의 Advanced 팬에 적용했습니다. 현재 온도 포인트를 유지하고 EC 속도 레벨만 교체했습니다. 팬 RPM은 1~3초 후 안정됩니다.", after);
                 }
                 catch (Exception exception)
                 {
@@ -402,6 +413,7 @@ namespace PowerModeSwitcher
             state.fan.baseline = new FanBaselineState
             {
                 firmware = status.firmware,
+                shiftMode = status.shiftMode,
                 fanMode = status.fanMode,
                 coolerBoost = status.coolerBoost,
                 cpuTemperatures = Copy(status.cpuTemperatures),
@@ -466,11 +478,15 @@ namespace PowerModeSwitcher
         private const byte GpuDutyAddress = 0x89;
         private const byte CpuRpmAddress = 0xC9;
         private const byte GpuRpmAddress = 0xCB;
+        private const byte ShiftModeAddress = 0xD2;
         private const byte FanModeAddress = 0xD4;
         private const byte CoolerBoostAddress = 0x98;
         private const byte CoolerBoostMask = 0x80;
         private const byte AutoMode = 0x0D;
         private const byte AdvancedMode = 0x8D;
+        private const byte BalancedShiftMode = 0xC1;
+        private const byte SuperBatteryShiftMode = 0xC2;
+        private const byte ExtremeShiftMode = 0xC4;
         private const int RpmDivisor = 478000;
         private const int MaxPlausibleRpm = 12000;
 
@@ -499,6 +515,7 @@ namespace PowerModeSwitcher
                         return status;
                     }
 
+                    status.shiftMode = ReadByteWith(instance, package, ShiftModeAddress);
                     status.fanMode = ReadByteWith(instance, package, FanModeAddress);
                     status.coolerBoost = (ReadByteWith(instance, package, CoolerBoostAddress) & CoolerBoostMask) != 0;
                     status.cpuTemperature = ReadByteWith(instance, package, CpuTemperatureAddress);
@@ -546,6 +563,10 @@ namespace PowerModeSwitcher
                     WithSession(delegate(ManagementObject instance, ManagementClass package)
                     {
                         SetCoolerBoostWith(instance, package, false);
+                        // MSI Center exposes Advanced fan editing only in the high-performance
+                        // scenario on this model. Move the EC scenario to Extreme first so the
+                        // GP66 does not keep the normal ~3500 RPM cap while D4=Advanced.
+                        WriteByteWith(instance, package, ShiftModeAddress, ExtremeShiftMode);
                         // Release any previous Advanced overlay before replacing the
                         // tables. The GP66 EC can otherwise keep using its cached duty
                         // until the fan-mode byte transitions through Auto.
@@ -560,9 +581,10 @@ namespace PowerModeSwitcher
                         return 0;
                     });
                     FanHardwareStatus after = Query(configuration);
-                    if (!MatchesCurve(after, cpuTemperatures, cpuSpeeds, gpuTemperatures, gpuSpeeds, AdvancedMode, false))
+                    if (!MatchesCurve(after, cpuTemperatures, cpuSpeeds, gpuTemperatures, gpuSpeeds, AdvancedMode, false) ||
+                        after.shiftMode != ExtremeShiftMode)
                     {
-                        throw new InvalidOperationException("적용한 팬 곡선의 WMI 읽기 검증이 일치하지 않습니다.");
+                        throw new InvalidOperationException("적용한 팬 곡선 또는 Extreme 시나리오의 WMI 읽기 검증이 일치하지 않습니다.");
                     }
 
                     return after;
@@ -647,6 +669,9 @@ namespace PowerModeSwitcher
                 EnsureWritable(current);
                 try
                 {
+                    byte restoreShift = IsKnownShiftMode(baseline.shiftMode)
+                        ? (byte)baseline.shiftMode
+                        : (byte)current.shiftMode;
                     WithSession(delegate(ManagementObject instance, ManagementClass package)
                     {
                         WriteRange(instance, package, 0x69, baseline.cpuTemperatures);
@@ -655,6 +680,10 @@ namespace PowerModeSwitcher
                         WriteRange(instance, package, 0x8A, baseline.gpuSpeeds);
                         WriteByteWith(instance, package, FanModeAddress, (byte)baseline.fanMode);
                         SetCoolerBoostWith(instance, package, baseline.coolerBoost);
+                        if (IsKnownShiftMode(restoreShift))
+                        {
+                            WriteByteWith(instance, package, ShiftModeAddress, restoreShift);
+                        }
                         return 0;
                     });
                     FanHardwareStatus after = Query(configuration);
@@ -665,7 +694,8 @@ namespace PowerModeSwitcher
                         baseline.gpuTemperatures,
                         baseline.gpuSpeeds,
                         baseline.fanMode,
-                        baseline.coolerBoost))
+                        baseline.coolerBoost) ||
+                        (IsKnownShiftMode(baseline.shiftMode) && after.shiftMode != baseline.shiftMode))
                     {
                         throw new InvalidOperationException("복원한 팬 baseline의 WMI 읽기 검증이 일치하지 않습니다.");
                     }
@@ -907,6 +937,10 @@ namespace PowerModeSwitcher
                     WriteRange(instance, package, 0x8A, backup.gpuSpeeds);
                     WriteByteWith(instance, package, FanModeAddress, (byte)backup.fanMode);
                     SetCoolerBoostWith(instance, package, backup.coolerBoost);
+                    if (IsKnownShiftMode(backup.shiftMode))
+                    {
+                        WriteByteWith(instance, package, ShiftModeAddress, (byte)backup.shiftMode);
+                    }
                     return 0;
                 });
                 return "오류 후 기존 팬 설정 복원을 시도했습니다.";
@@ -939,6 +973,11 @@ namespace PowerModeSwitcher
                 return false;
             }
 
+            if (baseline.shiftMode != 0 && !IsKnownShiftMode(baseline.shiftMode))
+            {
+                return false;
+            }
+
             FanHardwareStatus status = new FanHardwareStatus
             {
                 fanMode = baseline.fanMode,
@@ -949,6 +988,11 @@ namespace PowerModeSwitcher
                 gpuSpeeds = baseline.gpuSpeeds
             };
             return HasPlausibleCurve(status);
+        }
+
+        private static bool IsKnownShiftMode(int value)
+        {
+            return value == BalancedShiftMode || value == SuperBatteryShiftMode || value == ExtremeShiftMode;
         }
 
         private static bool IsStrictlyAscending(int[] values)

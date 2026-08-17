@@ -571,7 +571,7 @@ namespace PowerModeSwitcher
 
             _fanStatusLabel.Text = (status.writeEnabled ? "쓰기 가능: " : "쓰기 잠금: ") + status.message;
             _fanStatusLabel.ForeColor = status.writeEnabled ? Color.FromArgb(31, 102, 66) : Color.FromArgb(145, 72, 24);
-            _fanReadbackLabel.Text = "펌웨어 " + (status.firmware ?? "확인 불가") + " · " + FanText.Mode(status.fanMode) +
+            _fanReadbackLabel.Text = "펌웨어 " + (status.firmware ?? "확인 불가") + " · " + FanText.Shift(status.shiftMode) + " · " + FanText.Mode(status.fanMode) +
                 " · Cooler Boost " + (status.coolerBoost ? "ON" : "OFF") + "\r\n" +
                 "CPU " + status.cpuTemperature + "°C / " + status.cpuDuty + "% / " + status.cpuRpm + " RPM · " +
                 "GPU " + status.gpuTemperature + "°C / " + status.gpuDuty + "% / " + status.gpuRpm + " RPM\r\n" +
