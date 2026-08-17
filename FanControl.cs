@@ -235,6 +235,99 @@ namespace PowerModeSwitcher
         }
     }
 
+    internal sealed class KeyboardBacklightStatus
+    {
+        public bool reachable { get; set; }
+        public bool writeEnabled { get; set; }
+        public string systemProductName { get; set; }
+        public string baseBoardProduct { get; set; }
+        public int level { get; set; }
+        public bool enabled { get; set; }
+        public string message { get; set; }
+    }
+
+    internal sealed class KeyboardBacklightActionResult
+    {
+        public bool success { get; set; }
+        public string title { get; set; }
+        public string message { get; set; }
+        public KeyboardBacklightStatus status { get; set; }
+
+        public static KeyboardBacklightActionResult Success(string title, string message, KeyboardBacklightStatus status)
+        {
+            return new KeyboardBacklightActionResult { success = true, title = title, message = message, status = status };
+        }
+
+        public static KeyboardBacklightActionResult Failure(string title, string message, KeyboardBacklightStatus status)
+        {
+            return new KeyboardBacklightActionResult { success = false, title = title, message = message, status = status };
+        }
+    }
+
+    internal sealed class KeyboardBacklightService
+    {
+        private const byte OffLevel = 0x80;
+        private const byte MaxLevel = 0x83;
+
+        private readonly MsiFanWmiBackend _backend = new MsiFanWmiBackend();
+        private readonly object _operationLock = new object();
+        private byte _savedOnLevel = MaxLevel;
+
+        public KeyboardBacklightStatus Query()
+        {
+            return _backend.QueryKeyboardBacklight();
+        }
+
+        public KeyboardBacklightActionResult Set(bool enabled)
+        {
+            lock (_operationLock)
+            {
+                try
+                {
+                    KeyboardBacklightStatus before = _backend.QueryKeyboardBacklight();
+                    if (before == null || !before.writeEnabled)
+                    {
+                        return KeyboardBacklightActionResult.Failure(
+                            "키보드 조명 변경 불가",
+                            before == null ? "키보드 조명 상태를 읽지 못했습니다." : before.message,
+                            before);
+                    }
+
+                    if (before.enabled && before.level >= 0x81 && before.level <= MaxLevel)
+                    {
+                        _savedOnLevel = (byte)before.level;
+                    }
+
+                    byte target = enabled
+                        ? (_savedOnLevel >= 0x81 && _savedOnLevel <= MaxLevel ? _savedOnLevel : MaxLevel)
+                        : OffLevel;
+                    KeyboardBacklightStatus after = _backend.SetKeyboardBacklightLevel(target);
+                    if (after == null || !after.writeEnabled || after.enabled != enabled)
+                    {
+                        return KeyboardBacklightActionResult.Failure(
+                            "키보드 조명 검증 실패",
+                            "요청은 보냈지만 조명 상태 readback이 일치하지 않습니다.",
+                            after);
+                    }
+
+                    return KeyboardBacklightActionResult.Success(
+                        enabled ? "키보드 조명 ON" : "키보드 조명 OFF",
+                        enabled ? "키보드 조명을 켰습니다." : "키보드 조명을 껐습니다.",
+                        after);
+                }
+                catch (Exception exception)
+                {
+                    KeyboardBacklightStatus status = null;
+                    try { status = _backend.QueryKeyboardBacklight(); } catch { }
+                    return KeyboardBacklightActionResult.Failure(
+                        "키보드 조명 변경 실패",
+                        exception.Message,
+                        status);
+                }
+            }
+        }
+    }
+
     internal static class FanText
     {
         public static string Mode(int value)
@@ -484,6 +577,7 @@ namespace PowerModeSwitcher
         private const byte CpuRpmAddress = 0xC9;
         private const byte GpuRpmAddress = 0xCB;
         private const byte ShiftModeAddress = 0xD2;
+        private const byte KeyboardBacklightAddress = 0xD3;
         private const byte FanModeAddress = 0xD4;
         private const byte CoolerBoostAddress = 0x98;
         private const byte CoolerBoostMask = 0x80;
@@ -498,6 +592,106 @@ namespace PowerModeSwitcher
         private readonly object _sync = new object();
         private ManagementObject _instance;
         private ManagementClass _package;
+
+        public KeyboardBacklightStatus QueryKeyboardBacklight()
+        {
+            try
+            {
+                MsiSystemIdentity identity = ReadSystemIdentity();
+                return WithSession(delegate(ManagementObject instance, ManagementClass package)
+                {
+                    KeyboardBacklightStatus status = new KeyboardBacklightStatus
+                    {
+                        reachable = true,
+                        systemProductName = identity.systemProductName,
+                        baseBoardProduct = identity.baseBoardProduct
+                    };
+                    if (!HardwareMatches(identity))
+                    {
+                        status.writeEnabled = false;
+                        status.message = "키보드 조명 backend는 " + FanHardwareGate.SystemProductName + " / " + FanHardwareGate.BaseBoardProduct + " 전용입니다. 감지값: " +
+                            (identity.systemProductName ?? "없음") + " / " + (identity.baseBoardProduct ?? "없음");
+                        return status;
+                    }
+
+                    status.level = ReadByteWith(instance, package, KeyboardBacklightAddress);
+                    status.enabled = status.level >= 0x81 && status.level <= 0x83;
+                    status.writeEnabled = status.level >= 0x80 && status.level <= 0x83;
+                    status.message = status.writeEnabled
+                        ? "GP66 키보드 조명 D3 readback 완료"
+                        : "D3 키보드 조명 값이 안전 범위(0x80~0x83)가 아니어서 쓰기를 잠갔습니다. 현재값: 0x" + status.level.ToString("X2");
+                    return status;
+                });
+            }
+            catch (Exception exception)
+            {
+                return new KeyboardBacklightStatus
+                {
+                    reachable = false,
+                    writeEnabled = false,
+                    message = "키보드 조명 WMI를 읽지 못했습니다. " + FriendlyError(exception)
+                };
+            }
+        }
+
+        public KeyboardBacklightStatus SetKeyboardBacklightLevel(byte level)
+        {
+            if (level < 0x80 || level > 0x83)
+            {
+                throw new ArgumentOutOfRangeException("level", "키보드 조명 값은 0x80~0x83만 허용됩니다.");
+            }
+
+            lock (_sync)
+            {
+                KeyboardBacklightStatus before = QueryKeyboardBacklight();
+                if (before == null || !before.writeEnabled)
+                {
+                    throw new InvalidOperationException(before == null ? "키보드 조명 상태를 읽지 못했습니다." : before.message);
+                }
+
+                if (before.level == level)
+                {
+                    return before;
+                }
+
+                try
+                {
+                    WithSession(delegate(ManagementObject instance, ManagementClass package)
+                    {
+                        WriteByteWith(instance, package, KeyboardBacklightAddress, level);
+                        return 0;
+                    });
+                    Thread.Sleep(120);
+                    KeyboardBacklightStatus after = QueryKeyboardBacklight();
+                    if (after == null || !after.writeEnabled || after.level != level)
+                    {
+                        throw new InvalidOperationException("키보드 조명 D3 쓰기 후 readback이 일치하지 않습니다.");
+                    }
+
+                    return after;
+                }
+                catch (Exception exception)
+                {
+                    try
+                    {
+                        if (before.level >= 0x80 && before.level <= 0x83)
+                        {
+                            WithSession(delegate(ManagementObject instance, ManagementClass package)
+                            {
+                                WriteByteWith(instance, package, KeyboardBacklightAddress, (byte)before.level);
+                                return 0;
+                            });
+                        }
+                    }
+                    catch
+                    {
+                        // Keep the original error; the next manual read will show the actual EC value.
+                    }
+
+                    throw new InvalidOperationException("키보드 조명 변경 후 복원/readback에 실패했습니다.", exception);
+                }
+            }
+        }
 
         public FanHardwareStatus Query(FanPresetDocument configuration)
         {

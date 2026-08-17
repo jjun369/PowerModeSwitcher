@@ -56,9 +56,12 @@ namespace PowerModeSwitcher
         private readonly FanPresetRepository _fanPresetRepository;
         private readonly List<Button> _applyButtons = new List<Button>();
         private readonly List<Control> _fanActionControls = new List<Control>();
+        private readonly List<Control> _keyboardActionControls = new List<Control>();
         private readonly Dictionary<string, Button> _fanPresetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
+        private readonly KeyboardBacklightService _keyboardBacklightService;
         private Label _lastAppliedLabel;
         private Label _workingLabel;
+        private Label _keyboardStatusLabel;
         private TableLayoutPanel _cardGrid;
         private TabPage _fanTab;
         private Label _fanStatusLabel;
@@ -68,6 +71,10 @@ namespace PowerModeSwitcher
         private IList<PowerProfile> _profiles;
         private FanPresetDocument _fanPresetDocument;
         private FanService _fanService;
+        private Button _keyboardOnButton;
+        private Button _keyboardOffButton;
+        private bool _keyboardBacklightAvailable;
+        private bool _busy;
 
         public MainForm(string applicationDirectory)
         {
@@ -80,6 +87,7 @@ namespace PowerModeSwitcher
                 new BackendClient(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")),
                 new PowerPlanService(),
                 new DisplayRefreshService());
+            _keyboardBacklightService = new KeyboardBacklightService();
 
             InitializeWindow();
             Load += delegate { LoadConfiguration(); };
@@ -125,6 +133,45 @@ namespace PowerModeSwitcher
             subtitle.ForeColor = Color.FromArgb(211, 221, 233);
             subtitle.Location = new Point(21, 56);
             header.Controls.Add(subtitle);
+
+            Panel keyboardPanel = new Panel();
+            keyboardPanel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            keyboardPanel.BackColor = header.BackColor;
+            keyboardPanel.Size = new Size(360, 78);
+            keyboardPanel.Location = new Point(Math.Max(390, header.ClientSize.Width - 380), 10);
+            header.Controls.Add(keyboardPanel);
+
+            Label keyboardTitle = new Label();
+            keyboardTitle.AutoSize = true;
+            keyboardTitle.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+            keyboardTitle.ForeColor = Color.White;
+            keyboardTitle.Text = "키보드 조명";
+            keyboardTitle.Location = new Point(0, 3);
+            keyboardPanel.Controls.Add(keyboardTitle);
+
+            _keyboardStatusLabel = new Label();
+            _keyboardStatusLabel.AutoSize = false;
+            _keyboardStatusLabel.Font = new Font("Segoe UI", 8.5F, FontStyle.Regular, GraphicsUnit.Point);
+            _keyboardStatusLabel.ForeColor = Color.FromArgb(211, 221, 233);
+            _keyboardStatusLabel.Text = "확인 중…";
+            _keyboardStatusLabel.TextAlign = ContentAlignment.MiddleLeft;
+            _keyboardStatusLabel.Location = new Point(0, 34);
+            _keyboardStatusLabel.Size = new Size(118, 30);
+            keyboardPanel.Controls.Add(_keyboardStatusLabel);
+
+            _keyboardOnButton = CreateKeyboardButton("ON", delegate { RunKeyboardOperation(true); });
+            _keyboardOnButton.Location = new Point(126, 22);
+            _keyboardOnButton.Size = new Size(100, 32);
+            keyboardPanel.Controls.Add(_keyboardOnButton);
+
+            _keyboardOffButton = CreateKeyboardButton("OFF", delegate { RunKeyboardOperation(false); });
+            _keyboardOffButton.Location = new Point(236, 22);
+            _keyboardOffButton.Size = new Size(100, 32);
+            keyboardPanel.Controls.Add(_keyboardOffButton);
+            header.Resize += delegate
+            {
+                keyboardPanel.Left = Math.Max(390, header.ClientSize.Width - keyboardPanel.Width - 20);
+            };
 
             Panel statusPanel = new Panel();
             statusPanel.Dock = DockStyle.Fill;
@@ -191,6 +238,7 @@ namespace PowerModeSwitcher
                 RenderCards();
                 RefreshLastAppliedLabel();
                 InitializeFanControl();
+                RefreshKeyboardBacklight();
             }
             catch (Exception exception)
             {
@@ -425,6 +473,148 @@ namespace PowerModeSwitcher
             button.Click += delegate { action(); };
             _fanActionControls.Add(button);
             return button;
+        }
+
+        private Button CreateKeyboardButton(string text, Action action)
+        {
+            Button button = new Button();
+            button.BackColor = Color.White;
+            button.FlatAppearance.BorderColor = Color.FromArgb(154, 169, 184);
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatStyle = FlatStyle.Flat;
+            button.ForeColor = Color.FromArgb(48, 72, 95);
+            button.Padding = new Padding(8, 2, 8, 2);
+            button.Text = text;
+            button.UseVisualStyleBackColor = false;
+            button.Click += delegate { action(); };
+            _keyboardActionControls.Add(button);
+            return button;
+        }
+
+        private void RefreshKeyboardBacklight()
+        {
+            _keyboardBacklightAvailable = false;
+            SetKeyboardControlsEnabled(false);
+            _keyboardStatusLabel.Text = "확인 중…";
+            _keyboardStatusLabel.ForeColor = Color.FromArgb(211, 221, 233);
+
+            Task<KeyboardBacklightStatus> task = Task.Factory.StartNew(delegate
+            {
+                return _keyboardBacklightService.Query();
+            });
+            task.ContinueWith(delegate(Task<KeyboardBacklightStatus> completedTask)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (completedTask.IsFaulted)
+                        {
+                            UpdateKeyboardBacklightStatus(null);
+                            return;
+                        }
+
+                        UpdateKeyboardBacklightStatus(completedTask.Result);
+                    });
+                }
+                catch
+                {
+                    // The form may close while the WMI read is pending.
+                }
+            });
+        }
+
+        private void RunKeyboardOperation(bool enabled)
+        {
+            SetBusy(true, enabled ? "키보드 조명 ON 적용 중…" : "키보드 조명 OFF 적용 중…");
+            Task<KeyboardBacklightActionResult> task = Task.Factory.StartNew(delegate
+            {
+                return _keyboardBacklightService.Set(enabled);
+            });
+            task.ContinueWith(delegate(Task<KeyboardBacklightActionResult> completedTask)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        SetBusy(false, String.Empty);
+                        if (completedTask.IsFaulted)
+                        {
+                            MessageBox.Show(
+                                "키보드 조명 변경 중 예기치 않은 오류가 발생했습니다.\r\n\r\n" +
+                                (completedTask.Exception == null ? "알 수 없는 오류" : completedTask.Exception.GetBaseException().Message),
+                                "PowerModeSwitcher",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                            RefreshKeyboardBacklight();
+                            return;
+                        }
+
+                        KeyboardBacklightActionResult result = completedTask.Result;
+                        UpdateKeyboardBacklightStatus(result.status);
+                        if (!result.success)
+                        {
+                            MessageBox.Show(
+                                result.message,
+                                result.title,
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                        }
+                    });
+                }
+                catch
+                {
+                    // The form may close while the WMI write is pending.
+                }
+            });
+        }
+
+        private void UpdateKeyboardBacklightStatus(KeyboardBacklightStatus status)
+        {
+            if (_keyboardStatusLabel == null)
+            {
+                return;
+            }
+
+            _keyboardBacklightAvailable = status != null && status.reachable && status.writeEnabled;
+            if (!_keyboardBacklightAvailable)
+            {
+                _keyboardStatusLabel.Text = status == null || !status.reachable ? "사용 불가" : "안전 잠금";
+                _keyboardStatusLabel.ForeColor = Color.FromArgb(255, 205, 155);
+                SetKeyboardButtonSelected(_keyboardOnButton, false);
+                SetKeyboardButtonSelected(_keyboardOffButton, false);
+                SetKeyboardControlsEnabled(false);
+                return;
+            }
+
+            _keyboardStatusLabel.Text = status.enabled ? "ON (D3 83)" : "OFF (D3 80)";
+            _keyboardStatusLabel.ForeColor = status.enabled
+                ? Color.FromArgb(167, 235, 191)
+                : Color.FromArgb(211, 221, 233);
+            SetKeyboardButtonSelected(_keyboardOnButton, status.enabled);
+            SetKeyboardButtonSelected(_keyboardOffButton, !status.enabled);
+            SetKeyboardControlsEnabled(!_busy);
+        }
+
+        private static void SetKeyboardButtonSelected(Button button, bool selected)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            button.BackColor = selected ? Color.FromArgb(40, 103, 160) : Color.White;
+            button.ForeColor = selected ? Color.White : Color.FromArgb(48, 72, 95);
+            button.FlatAppearance.BorderColor = Color.FromArgb(154, 169, 184);
+            button.FlatAppearance.BorderSize = selected ? 0 : 1;
+        }
+
+        private void SetKeyboardControlsEnabled(bool enabled)
+        {
+            foreach (Control control in _keyboardActionControls)
+            {
+                control.Enabled = enabled;
+            }
         }
 
         private void RefreshFanPresetSelection()
@@ -757,6 +947,7 @@ namespace PowerModeSwitcher
 
         private void SetBusy(bool busy, string message)
         {
+            _busy = busy;
             foreach (Button button in _applyButtons)
             {
                 button.Enabled = !busy;
@@ -766,6 +957,8 @@ namespace PowerModeSwitcher
             {
                 control.Enabled = !busy;
             }
+
+            SetKeyboardControlsEnabled(!busy && _keyboardBacklightAvailable);
 
             _workingLabel.Text = message;
             _workingLabel.Left = Math.Max(14, _workingLabel.Parent.ClientSize.Width - _workingLabel.Width - 14);
