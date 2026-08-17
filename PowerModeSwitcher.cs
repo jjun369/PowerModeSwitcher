@@ -266,7 +266,7 @@ namespace PowerModeSwitcher
             warning.Size = new Size(1040, 66);
             warning.Text = "비공식 " + _fanPresetDocument.systemProductName + " / " + _fanPresetDocument.baseBoardProduct +
                 " 전용 제어입니다. 모델·보드와 현재 팬 곡선이 확인될 때만 쓰기가 활성화됩니다. MSI Center/Fn 키/절전 모드는 설정을 덮어쓸 수 있습니다. " +
-                "20·50·70·90%는 고정 속도가 아니라 고온에서 100%까지 올라가는 안전 팬 곡선입니다.";
+                "20·50·70·90%는 현재 온도에서 유지할 목표 속도이며 90°C에서는 안전상 100%로 올라갑니다.";
             stack.Controls.Add(warning);
 
             GroupBox statusGroup = new GroupBox();
