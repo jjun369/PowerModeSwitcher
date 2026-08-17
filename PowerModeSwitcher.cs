@@ -29,6 +29,22 @@ namespace PowerModeSwitcher
                 return SelfTest.Run(applicationDirectory);
             }
 
+            if (args != null && args.Any(delegate(string argument)
+            {
+                return string.Equals(argument, "--cpu-power-probe", StringComparison.OrdinalIgnoreCase);
+            }))
+            {
+                return CpuPowerDiagnostic.Run(applicationDirectory, FindOptionValue(args, "--cpu-power-probe-path"));
+            }
+
+            if (args != null && args.Any(delegate(string argument)
+            {
+                return string.Equals(argument, "--cpu-power-apply-probe", StringComparison.OrdinalIgnoreCase);
+            }))
+            {
+                return CpuPowerDiagnostic.RunApplyProbe(applicationDirectory, FindOptionValue(args, "--cpu-power-probe-path"));
+            }
+
             try
             {
                 Application.EnableVisualStyles();
@@ -45,6 +61,24 @@ namespace PowerModeSwitcher
                     MessageBoxIcon.Error);
                 return 1;
             }
+        }
+
+        private static string FindOptionValue(string[] args, string option)
+        {
+            if (args == null)
+            {
+                return null;
+            }
+
+            for (int index = 0; index + 1 < args.Length; index++)
+            {
+                if (string.Equals(args[index], option, StringComparison.OrdinalIgnoreCase))
+                {
+                    return args[index + 1];
+                }
+            }
+
+            return null;
         }
     }
 
@@ -87,7 +121,8 @@ namespace PowerModeSwitcher
                 _stateRepository,
                 new BackendClient(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")),
                 new PowerPlanService(),
-                new DisplayRefreshService());
+                new DisplayRefreshService(),
+                applicationDirectory);
             _keyboardBacklightService = new KeyboardBacklightService();
 
             InitializeWindow();
@@ -187,6 +222,19 @@ namespace PowerModeSwitcher
             _lastAppliedLabel.Text = "마지막 적용 모드: 없음";
             _lastAppliedLabel.Location = new Point(14, 14);
             statusPanel.Controls.Add(_lastAppliedLabel);
+
+            Button cpuPowerStatus = new Button();
+            cpuPowerStatus.AutoSize = false;
+            cpuPowerStatus.FlatStyle = FlatStyle.Flat;
+            cpuPowerStatus.Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold, GraphicsUnit.Point);
+            cpuPowerStatus.ForeColor = Color.FromArgb(35, 82, 123);
+            cpuPowerStatus.BackColor = Color.White;
+            cpuPowerStatus.FlatAppearance.BorderColor = Color.FromArgb(145, 168, 188);
+            cpuPowerStatus.Text = "CPU PL 상태";
+            cpuPowerStatus.Size = new Size(112, 28);
+            cpuPowerStatus.Location = new Point(465, 10);
+            cpuPowerStatus.Click += delegate { ShowCpuPowerStatus(); };
+            statusPanel.Controls.Add(cpuPowerStatus);
 
             _workingLabel = new Label();
             _workingLabel.AutoSize = true;
@@ -948,6 +996,41 @@ namespace PowerModeSwitcher
             });
         }
 
+        private void ShowCpuPowerStatus()
+        {
+            _workingLabel.Text = "CPU PL 상태 확인 중…";
+            Task<CpuPowerBackendStatus> task = Task.Factory.StartNew(delegate
+            {
+                return _powerModeService.QueryCpuPower();
+            });
+
+            task.ContinueWith(delegate(Task<CpuPowerBackendStatus> completedTask)
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    _workingLabel.Text = String.Empty;
+                    if (completedTask.IsFaulted)
+                    {
+                        MessageBox.Show(
+                            "CPU Power 상태를 읽지 못했습니다.\r\n\r\n" +
+                            (completedTask.Exception == null ? "알 수 없는 오류" : completedTask.Exception.GetBaseException().Message),
+                            "CPU PL 상태",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    CpuPowerBackendStatus status = completedTask.Result;
+                    MessageBox.Show(
+                        (status == null ? "CPU Power backend 상태를 읽지 못했습니다." : status.message) +
+                            "\r\n\r\n이 버튼은 읽기 전용입니다.",
+                        "CPU PL 상태",
+                        MessageBoxButtons.OK,
+                        status != null && status.available ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                });
+            });
+        }
+
         private void SetBusy(bool busy, string message)
         {
             _busy = busy;
@@ -1128,13 +1211,14 @@ namespace PowerModeSwitcher
             StateRepository stateRepository,
             BackendClient backend,
             PowerPlanService powerPlans,
-            DisplayRefreshService displayRefresh)
+            DisplayRefreshService displayRefresh,
+            string applicationDirectory)
         {
             _stateRepository = stateRepository;
             _backend = backend;
             _powerPlans = powerPlans;
             _displayRefresh = displayRefresh;
-            _cpuPower = new UnavailableCpuPowerBackend();
+            _cpuPower = new PawnIoIntelPowerBackend(Path.Combine(applicationDirectory, "helpers", "PawnIO"));
         }
 
         public ProfileApplyResult Apply(PowerProfile profile)
@@ -1159,6 +1243,11 @@ namespace PowerModeSwitcher
             }
 
             return result;
+        }
+
+        public CpuPowerBackendStatus QueryCpuPower()
+        {
+            return _cpuPower.Query();
         }
 
         private void CaptureBaseline(AppState state, ProfileApplyResult result, PowerProfile profile)
@@ -1198,19 +1287,18 @@ namespace PowerModeSwitcher
 
             bool profileNeedsPowerLimits = profile != null &&
                 (profile.isRestore || profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue);
-            if (profileNeedsPowerLimits && (!state.baseline.pl1.HasValue || !state.baseline.pl2.HasValue))
+            if (profileNeedsPowerLimits && String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw))
             {
                 CpuPowerBackendStatus powerLimits = _cpuPower.Query();
                 if (powerLimits != null && powerLimits.available && powerLimits.readbackAvailable &&
-                    powerLimits.pl1.HasValue && powerLimits.pl2.HasValue)
+                    !String.IsNullOrWhiteSpace(powerLimits.powerLimitRaw))
                 {
-                    state.baseline.pl1 = powerLimits.pl1;
-                    state.baseline.pl2 = powerLimits.pl2;
-                    captured.Add("PL1/PL2 상태");
+                    state.baseline.cpuPowerMsrRaw = powerLimits.powerLimitRaw;
+                    captured.Add("CPU PL1/PL2/Tau MSR snapshot");
                 }
                 else if (powerLimits != null && powerLimits.available)
                 {
-                    unavailable.Add("PL1/PL2 상태: " + (powerLimits == null ? "읽기 실패" : powerLimits.message));
+                    unavailable.Add("PL1/PL2/Tau 상태: " + powerLimits.message);
                 }
             }
 
@@ -1325,28 +1413,23 @@ namespace PowerModeSwitcher
                 if (backendStatus == null || !backendStatus.available)
                 {
                     result.Add(SettingResult.Warning(
-                        "PL1 / PL2",
+                        "PL1 / PL2 / Tau",
                         (backendStatus == null ? "CPU Power backend 상태를 확인하지 못했습니다." : backendStatus.message) +
-                            " 저장된 PL1/PL2 값은 적용하지 않았습니다.",
+                            " 저장된 CPU power 값을 적용하지 않았습니다.",
                         true));
                 }
-                else if (state.baseline == null || !state.baseline.pl1.HasValue || !state.baseline.pl2.HasValue)
+                else if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw))
                 {
                     result.Add(SettingResult.Warning(
-                        "PL1 / PL2",
-                        "저장된 PL1/PL2 baseline이 없어 원래 값을 추정하지 않았습니다.",
+                        "PL1 / PL2 / Tau",
+                        "저장된 CPU power MSR snapshot이 없어 원래 값을 추정하지 않았습니다.",
                         true));
                 }
                 else
                 {
-                    result.Add(_cpuPower.Apply(state.baseline.pl1.Value, state.baseline.pl2.Value, null)
-                        .ToSettingResult("PL1 / PL2"));
+                    result.Add(_cpuPower.Restore(state.baseline.cpuPowerMsrRaw)
+                        .ToSettingResult("PL1 / PL2 / Tau"));
                 }
-
-                result.Add(SettingResult.Warning(
-                    "Tau",
-                    "검증된 CPU Power backend와 저장된 Tau baseline이 없어 원래 값을 추정하지 않았습니다.",
-                    true));
                 return;
             }
 
@@ -1355,109 +1438,27 @@ namespace PowerModeSwitcher
                 if (backendStatus == null || !backendStatus.available)
                 {
                     result.Add(SettingResult.Warning(
-                        "PL1 / PL2",
+                        "PL1 / PL2 / Tau",
                         (backendStatus == null ? "CPU Power backend 상태를 확인하지 못했습니다." : backendStatus.message) +
-                            " 요청값 " + profile.pl1.Value + "W / " + profile.pl2.Value + "W는 변경하지 않았습니다.",
+                            " 요청값 " + profile.pl1.Value + "W / " + profile.pl2.Value + "W / " +
+                            profile.tau.Value + "초는 변경하지 않았습니다.",
                         true));
                 }
                 else
                 {
                     result.Add(_cpuPower.Apply(profile.pl1.Value, profile.pl2.Value, profile.tau)
-                        .ToSettingResult("PL1 / PL2"));
+                        .ToSettingResult("PL1 / PL2 / Tau"));
                 }
             }
             else
             {
-                result.Add(SettingResult.Warning("PL1 / PL2", "PL1과 PL2를 함께 지정하지 않아 변경하지 않았습니다.", true));
-            }
-
-            if (profile.tau.HasValue)
-            {
-                result.Add(SettingResult.Warning(
-                    "Tau",
-                    "검증된 CPU Power backend가 없어 요청값 " + profile.tau.Value + "초는 변경하지 않았습니다.",
-                    true));
+                result.Add(SettingResult.Warning("PL1 / PL2 / Tau", "PL1·PL2·Tau를 함께 지정하지 않아 변경하지 않았습니다.", true));
             }
         }
 
         private void ApplyRefresh(PowerProfile profile, ProfileApplyResult result)
         {
             result.Add(_displayRefresh.EnsureRefreshRate(profile.refreshRate));
-        }
-    }
-
-    internal enum CpuPowerApplyState
-    {
-        Verified,
-        Unverified,
-        Failed
-    }
-
-    internal sealed class CpuPowerApplyResult
-    {
-        public CpuPowerApplyState state { get; set; }
-        public string message { get; set; }
-
-        public static CpuPowerApplyResult Verified(string message)
-        {
-            return new CpuPowerApplyResult { state = CpuPowerApplyState.Verified, message = message };
-        }
-
-        public static CpuPowerApplyResult Unverified(string message)
-        {
-            return new CpuPowerApplyResult { state = CpuPowerApplyState.Unverified, message = message };
-        }
-
-        public static CpuPowerApplyResult Failed(string message)
-        {
-            return new CpuPowerApplyResult { state = CpuPowerApplyState.Failed, message = message };
-        }
-
-        public SettingResult ToSettingResult(string setting)
-        {
-            if (state == CpuPowerApplyState.Verified) return SettingResult.Success(setting, message);
-            if (state == CpuPowerApplyState.Unverified) return SettingResult.Unverified(setting, message);
-            return SettingResult.Failure(setting, message);
-        }
-    }
-
-    internal sealed class CpuPowerBackendStatus
-    {
-        public bool available { get; set; }
-        public bool readbackAvailable { get; set; }
-        public bool tauSupported { get; set; }
-        public int? pl1 { get; set; }
-        public int? pl2 { get; set; }
-        public string message { get; set; }
-    }
-
-    // This boundary intentionally has no direct MSR/MMIO implementation. A backend
-    // must be able to verify its own readback before profiles are allowed to use it.
-    internal abstract class CpuPowerBackend
-    {
-        public abstract CpuPowerBackendStatus Query();
-        public abstract CpuPowerApplyResult Apply(int pl1, int pl2, int? tau);
-    }
-
-    internal sealed class UnavailableCpuPowerBackend : CpuPowerBackend
-    {
-        private const string UnavailableMessage =
-            "CPU Power backend를 사용할 수 없습니다. 이 GP66에서 MSI Center WMI PL readback은 0W / 0W(Unknown)를 반환해 검증되지 않았습니다.";
-
-        public override CpuPowerBackendStatus Query()
-        {
-            return new CpuPowerBackendStatus
-            {
-                available = false,
-                readbackAvailable = false,
-                tauSupported = false,
-                message = UnavailableMessage
-            };
-        }
-
-        public override CpuPowerApplyResult Apply(int pl1, int pl2, int? tau)
-        {
-            return CpuPowerApplyResult.Failed(UnavailableMessage + " 쓰기 요청은 보내지 않았습니다.");
         }
     }
 
@@ -2162,6 +2163,7 @@ namespace PowerModeSwitcher
         public string dGpuState { get; set; }
         public int? pl1 { get; set; }
         public int? pl2 { get; set; }
+        public string cpuPowerMsrRaw { get; set; }
     }
 
     internal sealed class ManagedPlan
@@ -2188,6 +2190,14 @@ namespace PowerModeSwitcher
                 {
                     throw new FileNotFoundException("PowerModeBackend.ps1을 찾을 수 없습니다.");
                 }
+
+                if (!File.Exists(Path.Combine(applicationDirectory, "helpers", "PawnIO", "IntelMSR.bin")) ||
+                    !File.Exists(Path.Combine(applicationDirectory, "helpers", "PawnIO", "IntelMCHBAR.bin")))
+                {
+                    throw new FileNotFoundException("PawnIO IntelMSR/IntelMCHBAR 모듈을 찾을 수 없습니다.");
+                }
+
+                IntelRaplCodec.AssertSelfTest();
 
                 foreach (PowerProfile profile in profiles)
                 {

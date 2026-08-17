@@ -28,3 +28,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## PawnIO Modules
+
+`helpers/PawnIO/IntelMSR.bin` and `helpers/PawnIO/IntelMCHBAR.bin` are
+unmodified official PawnIO Modules release 0.2.10 files.
+
+Source and release: https://github.com/namazso/PawnIO.Modules
+
+Copyright (C) 2025-2026 namazso and contributors
+
+LGPL-2.1-or-later. The complete license text is included at
+`helpers/PawnIO/COPYING`.
+
+PowerModeSwitcher communicates with a separately installed official signed
+PawnIO driver through its documented device I/O interface. The driver itself is
+not bundled. No custom driver, unsigned module, or MCHBAR write module is used.
