@@ -10,8 +10,8 @@
       "pl2": null,
       "tau": null,
       "refreshRate": 144,
-      "changes": ["dGPU baseline 복원", "Turbo Boost baseline 복원", "저장된 PL1/PL2/Tau MSR snapshot 복원", "관리된 Windows 전원 설정 baseline 복원", "144Hz 유지"],
-      "notes": ["baseline이 없으면 OEM 기본값을 추정하지 않습니다.", "복원은 앱이 최초 PL 변경 전 저장한 MSR 0x610 raw snapshot만 사용하며 lock bit는 절대 설정하지 않습니다."],
+      "changes": ["dGPU baseline 복원", "Turbo Boost baseline 복원", "저장된 PL1/PL2/Tau MSR 필드 복원", "관리된 Windows 전원 설정 baseline 복원", "144Hz 유지"],
+      "notes": ["baseline이 없으면 OEM 기본값을 추정하지 않습니다.", "복원은 동일 CPU/기기 지문과 RAPL unit이 확인될 때만 PL1/PL2/Tau 필드를 되돌리며 lock bit는 절대 설정하지 않습니다."],
       "isRestore": true
     },
     {
@@ -53,7 +53,7 @@
       "tau": 28,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 60W", "PL2 90W", "Tau 28초", "144Hz 유지"],
-      "notes": ["공식 PawnIO MSR backend로 적용 후 MSR readback을 검증합니다.", "MCHBAR에 더 낮은 제한이 있으면 성공으로 표시하지 않습니다.", "Turbo는 호출자가 명시적으로 전달한 전원 구성표에만 적용합니다."],
+      "notes": ["공식 PawnIO MSR backend로 적용 후 MSR 0x610 readback을 검증합니다.", "MCHBAR 값은 상태 확인용으로만 표시합니다.", "Turbo는 호출자가 명시적으로 전달한 전원 구성표에만 적용합니다."],
       "isRestore": false
     },
     {
@@ -67,7 +67,7 @@
       "tau": 16,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 40W", "PL2 65W", "Tau 16초", "144Hz 유지"],
-      "notes": ["11800H 성능을 상당 부분 유지하면서 발열을 줄이는 값입니다.", "공식 PawnIO MSR backend로 적용 후 MSR·MCHBAR readback을 확인합니다."],
+      "notes": ["11800H 성능을 상당 부분 유지하면서 발열을 줄이는 값입니다.", "공식 PawnIO MSR backend로 적용 후 MSR 0x610 readback을 확인합니다."],
       "isRestore": false
     },
     {
@@ -81,7 +81,7 @@
       "tau": 8,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 25W", "PL2 40W", "Tau 8초", "144Hz 유지"],
-      "notes": ["성능 대비 전력 효율을 중시합니다.", "공식 PawnIO MSR backend로 적용 후 MSR·MCHBAR readback을 확인합니다."],
+      "notes": ["성능 대비 전력 효율을 중시합니다.", "공식 PawnIO MSR backend로 적용 후 MSR 0x610 readback을 확인합니다."],
       "isRestore": false
     },
     {
@@ -95,7 +95,7 @@
       "tau": 4,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 15W", "PL2 25W", "Tau 4초", "144Hz 유지"],
-      "notes": ["Turbo Boost는 끄지 않아 반응성을 유지합니다.", "Silent와 구분되는 배터리 효율 모드입니다.", "공식 PawnIO MSR backend로 적용 후 MSR·MCHBAR readback을 확인합니다."],
+      "notes": ["Turbo Boost는 끄지 않아 반응성을 유지합니다.", "Silent와 구분되는 배터리 효율 모드입니다.", "공식 PawnIO MSR backend로 적용 후 MSR 0x610 readback을 확인합니다."],
       "isRestore": false
     },
     {
@@ -109,7 +109,7 @@
       "tau": 8,
       "refreshRate": 144,
       "changes": ["dGPU ON", "Turbo Boost ON", "PL1 35W", "PL2 55W", "Tau 8초", "144Hz 유지"],
-      "notes": ["PL 수치는 이 파일에서 조정할 수 있습니다.", "공식 PawnIO MSR backend로 적용 후 MSR·MCHBAR readback을 확인합니다."],
+      "notes": ["PL 수치는 이 파일에서 조정할 수 있습니다.", "공식 PawnIO MSR backend로 적용 후 MSR 0x610 readback을 확인합니다."],
       "isRestore": false
     }
   ]

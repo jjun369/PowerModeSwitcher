@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -54,6 +55,8 @@ namespace PowerModeSwitcher
         public double? pl2Watts { get; set; }
         public double? tauSeconds { get; set; }
         public string powerLimitRaw { get; set; }
+        public string powerUnitRaw { get; set; }
+        public string cpuFingerprint { get; set; }
         public string message { get; set; }
     }
 
@@ -61,7 +64,7 @@ namespace PowerModeSwitcher
     {
         public abstract CpuPowerBackendStatus Query();
         public abstract CpuPowerApplyResult Apply(int pl1, int pl2, int? tau);
-        public abstract CpuPowerApplyResult Restore(string rawPowerLimit);
+        public abstract CpuPowerApplyResult Restore(string rawPowerLimit, string powerUnitRaw, string cpuFingerprint);
     }
 
     // Uses the separately installed, signed PawnIO driver and the unmodified official
@@ -79,6 +82,9 @@ namespace PowerModeSwitcher
         private const ulong HighLockMask = 1UL << 63;
         private const ulong WritableMask = Pl1PowerMask | Pl1EnableMask | Pl1TimeMask | Pl2PowerMask | Pl2EnableMask;
         private const int MchbarPackageLimitOffset = 0x59a0;
+        private const int MaximumPl1Watts = 80;
+        private const int MaximumPl2Watts = 100;
+        private const int MaximumTauSeconds = 56;
 
         private readonly object _sync = new object();
         private readonly string _msrModulePath;
@@ -96,10 +102,16 @@ namespace PowerModeSwitcher
             {
                 try
                 {
+                    CpuPowerEligibility eligibility = ReadEligibility();
+                    if (!eligibility.supported)
+                    {
+                        return UnavailableStatus(eligibility.message);
+                    }
+
                     using (new ThreadAffinityScope())
                     {
                         RaplSnapshot snapshot = ReadSnapshot();
-                        return ToStatus(snapshot);
+                        return ToStatus(snapshot, eligibility);
                     }
                 }
                 catch (Exception exception)
@@ -118,18 +130,27 @@ namespace PowerModeSwitcher
 
         public override CpuPowerApplyResult Apply(int pl1, int pl2, int? tau)
         {
-            if (!tau.HasValue || pl1 <= 0 || pl2 < pl1 || tau.Value <= 0)
+            string requestError = ValidateRequest(pl1, pl2, tau);
+            if (!String.IsNullOrWhiteSpace(requestError))
             {
-                return CpuPowerApplyResult.Failed("PL1·PL2·Tau는 모두 양수여야 하며 PL2는 PL1 이상이어야 합니다.");
+                return CpuPowerApplyResult.Failed(requestError);
             }
 
+            RaplSnapshot before = null;
+            bool writeAttempted = false;
             lock (_sync)
             {
                 try
                 {
+                    CpuPowerEligibility eligibility = ReadEligibility();
+                    if (!eligibility.supported)
+                    {
+                        return CpuPowerApplyResult.Failed(eligibility.message);
+                    }
+
                     using (new ThreadAffinityScope())
                     {
-                        RaplSnapshot before = ReadSnapshot();
+                        before = ReadSnapshot();
                         if (before.msrLocked)
                         {
                             return CpuPowerApplyResult.Failed(
@@ -138,75 +159,91 @@ namespace PowerModeSwitcher
 
                         ulong target = BuildTargetRaw(before, pl1, pl2, tau.Value);
                         WritePackagePowerLimit(target);
+                        writeAttempted = true;
                         Thread.Sleep(80);
 
                         RaplSnapshot after = ReadSnapshot();
                         if ((after.packageLimitRaw & WritableMask) != (target & WritableMask))
                         {
-                            return CpuPowerApplyResult.Failed(
+                            return FailAfterWrite(before,
                                 "MSR write 후 readback이 일치하지 않습니다. 요청 " + DescribeTarget(pl1, pl2, tau.Value) +
                                 " / 결과 " + DescribeSnapshot(after) + ".");
                         }
 
                         string verified = "MSR 0x610 readback 검증: " + DescribeSnapshot(after) + ".";
-                        string effectiveProblem = GetMchbarConstraint(after, pl1, pl2, tau.Value);
-                        if (!String.IsNullOrWhiteSpace(effectiveProblem))
-                        {
-                            return CpuPowerApplyResult.Unverified(verified + " " + effectiveProblem);
-                        }
-
                         return CpuPowerApplyResult.Verified(
-                            verified + " MCHBAR readback도 목표값보다 낮은 제한이 없음을 확인했습니다.");
+                            verified + " MCHBAR 값은 상태 표시용으로만 읽었습니다.");
                     }
                 }
                 catch (Exception exception)
                 {
-                    return CpuPowerApplyResult.Failed("PL1/PL2/Tau 적용 실패: " + FriendlyError(exception));
+                    string message = "PL1/PL2/Tau 적용 실패: " + FriendlyError(exception);
+                    return writeAttempted && before != null
+                        ? FailAfterWrite(before, message)
+                        : CpuPowerApplyResult.Failed(message);
                 }
             }
         }
 
-        public override CpuPowerApplyResult Restore(string rawPowerLimit)
+        public override CpuPowerApplyResult Restore(string rawPowerLimit, string powerUnitRaw, string cpuFingerprint)
         {
-            ulong target;
-            if (!TryParseRaw(rawPowerLimit, out target))
+            ulong savedRaw;
+            if (!TryParseRaw(rawPowerLimit, out savedRaw))
             {
                 return CpuPowerApplyResult.Failed("저장된 CPU power MSR snapshot 형식이 올바르지 않습니다.");
             }
 
-            if ((target & (LowLockMask | HighLockMask)) != 0)
-            {
-                return CpuPowerApplyResult.Failed("저장된 snapshot에 lock bit가 있어 lock을 설정하지 않고 복원을 중단했습니다.");
-            }
-
+            RaplSnapshot before = null;
+            bool writeAttempted = false;
             lock (_sync)
             {
                 try
                 {
+                    CpuPowerEligibility eligibility = ReadEligibility();
+                    if (!eligibility.supported)
+                    {
+                        return CpuPowerApplyResult.Failed(eligibility.message);
+                    }
+
+                    if (!String.Equals(cpuFingerprint, eligibility.fingerprint, StringComparison.Ordinal))
+                    {
+                        return CpuPowerApplyResult.Failed("저장된 CPU power snapshot의 CPU/기기 지문이 현재 PC와 달라 복원하지 않았습니다.");
+                    }
+
                     using (new ThreadAffinityScope())
                     {
-                        RaplSnapshot before = ReadSnapshot();
+                        before = ReadSnapshot();
+                        if (!String.Equals(powerUnitRaw, FormatRaw(before.powerUnitRaw), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return CpuPowerApplyResult.Failed("저장된 CPU power snapshot의 RAPL unit이 현재 CPU와 달라 복원하지 않았습니다.");
+                        }
+
                         if (before.msrLocked)
                         {
                             return CpuPowerApplyResult.Failed(
                                 "MSR_PACKAGE_POWER_LIMIT(0x610)이 lock 상태여서 저장된 snapshot을 복원하지 않았습니다.");
                         }
 
+                        ulong target = (before.packageLimitRaw & ~WritableMask) | (savedRaw & WritableMask);
                         WritePackagePowerLimit(target);
+                        writeAttempted = true;
                         Thread.Sleep(80);
                         RaplSnapshot after = ReadSnapshot();
-                        if (after.packageLimitRaw != target)
+                        if ((after.packageLimitRaw & WritableMask) != (target & WritableMask))
                         {
-                            return CpuPowerApplyResult.Failed("CPU power MSR snapshot 복원 후 readback이 일치하지 않습니다.");
+                            return FailAfterWrite(before, "CPU power MSR snapshot 복원 후 readback이 일치하지 않습니다.");
                         }
 
                         return CpuPowerApplyResult.Verified(
-                            "저장된 CPU power MSR snapshot을 복원하고 readback을 확인했습니다: " + DescribeSnapshot(after) + ".");
+                            "저장된 CPU power MSR snapshot의 PL1/PL2/Tau 필드를 복원하고 readback을 확인했습니다: " + DescribeSnapshot(after) + ".");
                     }
                 }
                 catch (Exception exception)
                 {
-                    return CpuPowerApplyResult.Failed("CPU power MSR snapshot 복원 실패: " + FriendlyError(exception));
+                    string message = "CPU power MSR snapshot 복원 실패: " + FriendlyError(exception);
+                    return writeAttempted && before != null
+                        ? FailAfterWrite(before, message)
+                        : CpuPowerApplyResult.Failed(message);
                 }
             }
         }
@@ -233,8 +270,7 @@ namespace PowerModeSwitcher
                 }
                 catch
                 {
-                    // MSR write/readback remains usable. The result becomes Unverified
-                    // if MCHBAR cannot be checked after a write.
+                    // MCHBAR is display-only; MSR write/readback remains usable.
                     snapshot.mchbarAvailable = false;
                 }
 
@@ -270,7 +306,36 @@ namespace PowerModeSwitcher
             return (value & ~mask) | ((replacement << shift) & mask);
         }
 
-        private static CpuPowerBackendStatus ToStatus(RaplSnapshot snapshot)
+        private CpuPowerApplyResult FailAfterWrite(RaplSnapshot before, string reason)
+        {
+            return CpuPowerApplyResult.Failed(reason + " " + TryRollback(before));
+        }
+
+        private string TryRollback(RaplSnapshot before)
+        {
+            try
+            {
+                RaplSnapshot current = ReadSnapshot();
+                if (current.msrLocked)
+                {
+                    return "자동 원복 불가: MSR lock 상태입니다. 재부팅 또는 수동 점검이 필요할 수 있습니다.";
+                }
+
+                ulong target = (current.packageLimitRaw & ~WritableMask) | (before.packageLimitRaw & WritableMask);
+                WritePackagePowerLimit(target);
+                Thread.Sleep(80);
+                RaplSnapshot after = ReadSnapshot();
+                return (after.packageLimitRaw & WritableMask) == (target & WritableMask)
+                    ? "이전 PL1/PL2/Tau 값을 자동 원복했습니다."
+                    : "자동 원복 readback이 일치하지 않습니다. 재부팅 또는 수동 점검이 필요할 수 있습니다.";
+            }
+            catch (Exception exception)
+            {
+                return "자동 원복 실패: " + FriendlyError(exception) + " 재부팅 또는 수동 점검이 필요할 수 있습니다.";
+            }
+        }
+
+        private static CpuPowerBackendStatus ToStatus(RaplSnapshot snapshot, CpuPowerEligibility eligibility)
         {
             string lockText = snapshot.msrLocked ? " · MSR lock ON" : " · MSR lock OFF";
             string mmioText = snapshot.mchbarAvailable
@@ -287,36 +352,118 @@ namespace PowerModeSwitcher
                 pl2Watts = snapshot.pl2Watts,
                 tauSeconds = snapshot.tauSeconds,
                 powerLimitRaw = FormatRaw(snapshot.packageLimitRaw),
+                powerUnitRaw = FormatRaw(snapshot.powerUnitRaw),
+                cpuFingerprint = eligibility.fingerprint,
                 message = "PawnIO RAPL MSR: " + DescribeSnapshot(snapshot) + lockText + mmioText
             };
         }
 
-        private static string GetMchbarConstraint(RaplSnapshot snapshot, int pl1, int pl2, int tau)
+        private static CpuPowerBackendStatus UnavailableStatus(string message)
         {
-            if (!snapshot.mchbarAvailable)
+            return new CpuPowerBackendStatus
             {
-                return "MCHBAR readback을 확인하지 못해 MMIO 동기화는 검증 불가입니다.";
+                available = false,
+                readbackAvailable = false,
+                tauSupported = false,
+                message = message
+            };
+        }
+
+        private static string ValidateRequest(int pl1, int pl2, int? tau)
+        {
+            if (!tau.HasValue || pl1 <= 0 || pl2 < pl1 || tau.Value <= 0)
+            {
+                return "PL1·PL2·Tau는 모두 양수여야 하며 PL2는 PL1 이상이어야 합니다.";
             }
 
-            if (snapshot.mchbarPl1Enabled && snapshot.mchbarPl1Watts + 0.0001 < pl1)
+            if (pl1 > MaximumPl1Watts || pl2 > MaximumPl2Watts || tau.Value > MaximumTauSeconds)
             {
-                return "MCHBAR PL1이 " + IntelRaplCodec.Format(snapshot.mchbarPl1Watts) +
-                    "W로 더 낮아 실제 제한값을 보장할 수 없습니다.";
-            }
-
-            if (snapshot.mchbarPl2Enabled && snapshot.mchbarPl2Watts + 0.0001 < pl2)
-            {
-                return "MCHBAR PL2가 " + IntelRaplCodec.Format(snapshot.mchbarPl2Watts) +
-                    "W로 더 낮아 실제 제한값을 보장할 수 없습니다.";
-            }
-
-            if (snapshot.mchbarPl1Enabled && snapshot.mchbarTauSeconds + 0.0001 < tau)
-            {
-                return "MCHBAR Tau가 " + IntelRaplCodec.Format(snapshot.mchbarTauSeconds) +
-                    "초로 더 짧아 실제 Tau를 보장할 수 없습니다.";
+                return "이 앱의 GP66 안전 범위는 PL1 1~" + MaximumPl1Watts + "W, PL2 1~" +
+                    MaximumPl2Watts + "W, Tau 1~" + MaximumTauSeconds + "초입니다.";
             }
 
             return null;
+        }
+
+        private static CpuPowerEligibility ReadEligibility()
+        {
+            try
+            {
+                string cpuName = null;
+                string cpuManufacturer = null;
+                string processorId = null;
+                string model = null;
+                string board = null;
+
+                using (ManagementObjectSearcher cpuSearch = new ManagementObjectSearcher(
+                    "root\\CIMV2", "SELECT Name, Manufacturer, ProcessorId FROM Win32_Processor"))
+                {
+                    foreach (ManagementObject cpu in cpuSearch.Get())
+                    {
+                        cpuName = ReadWmiText(cpu, "Name");
+                        cpuManufacturer = ReadWmiText(cpu, "Manufacturer");
+                        processorId = ReadWmiText(cpu, "ProcessorId");
+                        break;
+                    }
+                }
+
+                using (ManagementObjectSearcher systemSearch = new ManagementObjectSearcher(
+                    "root\\CIMV2", "SELECT Model FROM Win32_ComputerSystem"))
+                {
+                    foreach (ManagementObject system in systemSearch.Get())
+                    {
+                        model = ReadWmiText(system, "Model");
+                        break;
+                    }
+                }
+
+                using (ManagementObjectSearcher boardSearch = new ManagementObjectSearcher(
+                    "root\\CIMV2", "SELECT Product FROM Win32_BaseBoard"))
+                {
+                    foreach (ManagementObject baseBoard in boardSearch.Get())
+                    {
+                        board = ReadWmiText(baseBoard, "Product");
+                        break;
+                    }
+                }
+
+                bool cpuMatches = !String.IsNullOrWhiteSpace(cpuName) &&
+                    cpuName.IndexOf("i7-11800H", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    String.Equals(cpuManufacturer, "GenuineIntel", StringComparison.OrdinalIgnoreCase);
+                bool modelMatches = !String.IsNullOrWhiteSpace(model) &&
+                    model.IndexOf("GP66", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    String.Equals(board, "MS-1543", StringComparison.OrdinalIgnoreCase);
+                if (!cpuMatches || !modelMatches)
+                {
+                    return new CpuPowerEligibility
+                    {
+                        supported = false,
+                        message = "CPU Power backend는 GP66 Leopard 11UG / MS-1543 / i7-11800H 전용입니다. 감지값: " +
+                            (cpuName ?? "없음") + " / " + (model ?? "없음") + " / " + (board ?? "없음")
+                    };
+                }
+
+                return new CpuPowerEligibility
+                {
+                    supported = true,
+                    fingerprint = cpuName.Trim() + "|" + (processorId ?? String.Empty).Trim() + "|" +
+                        model.Trim() + "|" + board.Trim()
+                };
+            }
+            catch (Exception exception)
+            {
+                return new CpuPowerEligibility
+                {
+                    supported = false,
+                    message = "CPU/모델 검증에 실패했습니다. " + FriendlyError(exception)
+                };
+            }
+        }
+
+        private static string ReadWmiText(ManagementObject item, string property)
+        {
+            object value = item == null ? null : item[property];
+            return value == null ? null : Convert.ToString(value, CultureInfo.InvariantCulture).Trim();
         }
 
         private static string DescribeTarget(int pl1, int pl2, int tau)
@@ -390,6 +537,13 @@ namespace PowerModeSwitcher
         public double mchbarTauSeconds;
     }
 
+    internal sealed class CpuPowerEligibility
+    {
+        public bool supported;
+        public string fingerprint;
+        public string message;
+    }
+
     internal static class IntelRaplCodec
     {
         private const ulong PowerMask = 0x7fffUL;
@@ -428,7 +582,7 @@ namespace PowerModeSwitcher
                 throw new InvalidOperationException("PL 전력 단위가 올바르지 않습니다.");
             }
 
-            double encoded = Math.Round(watts / powerUnitWatts, MidpointRounding.AwayFromZero);
+            double encoded = Math.Floor((watts / powerUnitWatts) + 0.0000001);
             if (encoded < 1 || encoded > 0x7fff)
             {
                 throw new InvalidOperationException("요청 PL 값이 이 CPU의 RAPL 표현 범위를 벗어났습니다.");
@@ -444,23 +598,27 @@ namespace PowerModeSwitcher
                 throw new InvalidOperationException("Tau 값 또는 RAPL 시간 단위가 올바르지 않습니다.");
             }
 
-            double closestError = Double.MaxValue;
-            byte closest = 0;
+            double closest = -1;
+            byte encoded = 0;
             for (int y = 0; y <= 31; y++)
             {
                 for (int f = 0; f <= 3; f++)
                 {
                     double candidate = Math.Pow(2.0, y) * (1.0 + (f / 4.0)) * timeUnitSeconds;
-                    double error = Math.Abs(candidate - seconds);
-                    if (error < closestError)
+                    if (candidate <= seconds + 0.0000001 && candidate > closest)
                     {
-                        closestError = error;
-                        closest = (byte)(y | (f << 5));
+                        closest = candidate;
+                        encoded = (byte)(y | (f << 5));
                     }
                 }
             }
 
-            return closest;
+            if (closest < 0)
+            {
+                throw new InvalidOperationException("요청 Tau가 이 CPU의 RAPL 표현 최소값보다 작습니다.");
+            }
+
+            return encoded;
         }
 
         public static double DecodeTimeWindow(byte encoded, double timeUnitSeconds)
@@ -704,39 +862,6 @@ namespace PowerModeSwitcher
                 CpuPowerBackendStatus status = backend.Query();
                 Write(status.message, outputPath);
                 return status.available && status.readbackAvailable ? 0 : 1;
-            }
-            catch (Exception exception)
-            {
-                Write("FAIL: " + exception.Message, outputPath);
-                return 1;
-            }
-        }
-
-        public static int RunApplyProbe(string applicationDirectory, string outputPath)
-        {
-            try
-            {
-                CpuPowerBackend backend = new PawnIoIntelPowerBackend(Path.Combine(applicationDirectory, "helpers", "PawnIO"));
-                CpuPowerBackendStatus before = backend.Query();
-                if (before == null || !before.available || !before.readbackAvailable || String.IsNullOrWhiteSpace(before.powerLimitRaw))
-                {
-                    Write(before == null ? "FAIL: CPU Power backend 상태를 읽지 못했습니다." : before.message, outputPath);
-                    return 1;
-                }
-
-                CpuPowerApplyResult applied = backend.Apply(15, 25, 4);
-                CpuPowerBackendStatus afterApply = backend.Query();
-                CpuPowerApplyResult restored = backend.Restore(before.powerLimitRaw);
-                CpuPowerBackendStatus afterRestore = backend.Query();
-
-                string report = "Before: " + before.message + "\r\n" +
-                    "Apply 15W/25W/4s: " + applied.message + "\r\n" +
-                    "After apply: " + (afterApply == null ? "읽기 실패" : afterApply.message) + "\r\n" +
-                    "Restore: " + restored.message + "\r\n" +
-                    "After restore: " + (afterRestore == null ? "읽기 실패" : afterRestore.message);
-                Write(report, outputPath);
-
-                return applied.state == CpuPowerApplyState.Verified && restored.state == CpuPowerApplyState.Verified ? 0 : 1;
             }
             catch (Exception exception)
             {

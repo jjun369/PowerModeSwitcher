@@ -37,14 +37,6 @@ namespace PowerModeSwitcher
                 return CpuPowerDiagnostic.Run(applicationDirectory, FindOptionValue(args, "--cpu-power-probe-path"));
             }
 
-            if (args != null && args.Any(delegate(string argument)
-            {
-                return string.Equals(argument, "--cpu-power-apply-probe", StringComparison.OrdinalIgnoreCase);
-            }))
-            {
-                return CpuPowerDiagnostic.RunApplyProbe(applicationDirectory, FindOptionValue(args, "--cpu-power-probe-path"));
-            }
-
             try
             {
                 Application.EnableVisualStyles();
@@ -1287,13 +1279,19 @@ namespace PowerModeSwitcher
 
             bool profileNeedsPowerLimits = profile != null &&
                 (profile.isRestore || profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue);
-            if (profileNeedsPowerLimits && String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw))
+            if (profileNeedsPowerLimits && (String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw) ||
+                String.IsNullOrWhiteSpace(state.baseline.cpuPowerUnitRaw) ||
+                String.IsNullOrWhiteSpace(state.baseline.cpuPowerFingerprint)))
             {
                 CpuPowerBackendStatus powerLimits = _cpuPower.Query();
                 if (powerLimits != null && powerLimits.available && powerLimits.readbackAvailable &&
-                    !String.IsNullOrWhiteSpace(powerLimits.powerLimitRaw))
+                    !String.IsNullOrWhiteSpace(powerLimits.powerLimitRaw) &&
+                    !String.IsNullOrWhiteSpace(powerLimits.powerUnitRaw) &&
+                    !String.IsNullOrWhiteSpace(powerLimits.cpuFingerprint))
                 {
                     state.baseline.cpuPowerMsrRaw = powerLimits.powerLimitRaw;
+                    state.baseline.cpuPowerUnitRaw = powerLimits.powerUnitRaw;
+                    state.baseline.cpuPowerFingerprint = powerLimits.cpuFingerprint;
                     captured.Add("CPU PL1/PL2/Tau MSR snapshot");
                 }
                 else if (powerLimits != null && powerLimits.available)
@@ -1418,7 +1416,9 @@ namespace PowerModeSwitcher
                             " 저장된 CPU power 값을 적용하지 않았습니다.",
                         true));
                 }
-                else if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw))
+                else if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.cpuPowerMsrRaw) ||
+                    String.IsNullOrWhiteSpace(state.baseline.cpuPowerUnitRaw) ||
+                    String.IsNullOrWhiteSpace(state.baseline.cpuPowerFingerprint))
                 {
                     result.Add(SettingResult.Warning(
                         "PL1 / PL2 / Tau",
@@ -1427,7 +1427,10 @@ namespace PowerModeSwitcher
                 }
                 else
                 {
-                    result.Add(_cpuPower.Restore(state.baseline.cpuPowerMsrRaw)
+                    result.Add(_cpuPower.Restore(
+                            state.baseline.cpuPowerMsrRaw,
+                            state.baseline.cpuPowerUnitRaw,
+                            state.baseline.cpuPowerFingerprint)
                         .ToSettingResult("PL1 / PL2 / Tau"));
                 }
                 return;
@@ -2164,6 +2167,8 @@ namespace PowerModeSwitcher
         public int? pl1 { get; set; }
         public int? pl2 { get; set; }
         public string cpuPowerMsrRaw { get; set; }
+        public string cpuPowerUnitRaw { get; set; }
+        public string cpuPowerFingerprint { get; set; }
     }
 
     internal sealed class ManagedPlan
