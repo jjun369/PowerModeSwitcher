@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace PowerModeSwitcher
@@ -545,11 +546,17 @@ namespace PowerModeSwitcher
                     WithSession(delegate(ManagementObject instance, ManagementClass package)
                     {
                         SetCoolerBoostWith(instance, package, false);
+                        // Release any previous Advanced overlay before replacing the
+                        // tables. The GP66 EC can otherwise keep using its cached duty
+                        // until the fan-mode byte transitions through Auto.
+                        WriteByteWith(instance, package, FanModeAddress, AutoMode);
+                        Thread.Sleep(120);
                         WriteRange(instance, package, 0x69, cpuTemperatures);
                         WriteRange(instance, package, 0x72, cpuSpeeds);
                         WriteRange(instance, package, 0x81, gpuTemperatures);
                         WriteRange(instance, package, 0x8A, gpuSpeeds);
                         WriteByteWith(instance, package, FanModeAddress, AdvancedMode);
+                        Thread.Sleep(250);
                         return 0;
                     });
                     FanHardwareStatus after = Query(configuration);

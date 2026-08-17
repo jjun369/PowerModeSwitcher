@@ -56,6 +56,7 @@ namespace PowerModeSwitcher
         private readonly FanPresetRepository _fanPresetRepository;
         private readonly List<Button> _applyButtons = new List<Button>();
         private readonly List<Control> _fanActionControls = new List<Control>();
+        private readonly Dictionary<string, Button> _fanPresetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
         private Label _lastAppliedLabel;
         private Label _workingLabel;
         private TableLayoutPanel _cardGrid;
@@ -63,6 +64,7 @@ namespace PowerModeSwitcher
         private Label _fanStatusLabel;
         private Label _fanReadbackLabel;
         private Label _fanPresetLabel;
+        private Button _fanAutoButton;
         private IList<PowerProfile> _profiles;
         private FanPresetDocument _fanPresetDocument;
         private FanService _fanService;
@@ -232,6 +234,8 @@ namespace PowerModeSwitcher
         {
             _fanTab.Controls.Clear();
             _fanActionControls.Clear();
+            _fanPresetButtons.Clear();
+            _fanAutoButton = null;
 
             Panel scroll = new Panel();
             scroll.Dock = DockStyle.Fill;
@@ -323,14 +327,17 @@ namespace PowerModeSwitcher
             presetButtons.WrapContents = false;
             presetsGroup.Controls.Add(presetButtons);
 
-            presetButtons.Controls.Add(CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(); }, true); }, false));
+            _fanAutoButton = CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(); }, true); }, false);
+            presetButtons.Controls.Add(_fanAutoButton);
             foreach (FanPreset preset in _fanPresetDocument.presets)
             {
                 FanPreset selectedPreset = preset;
-                presetButtons.Controls.Add(CreateFanButton(selectedPreset.name, delegate
+                Button presetButton = CreateFanButton(selectedPreset.name, delegate
                 {
                     RunFanOperation(selectedPreset.name + " 적용 중…", delegate { return _fanService.ApplyPreset(selectedPreset); }, true);
-                }, selectedPreset.id == "curve-50"));
+                }, false);
+                _fanPresetButtons[selectedPreset.id] = presetButton;
+                presetButtons.Controls.Add(presetButton);
             }
 
             _fanPresetLabel = new Label();
@@ -341,6 +348,7 @@ namespace PowerModeSwitcher
             _fanPresetLabel.Size = new Size(1000, 25);
             _fanPresetLabel.Text = "프리셋 값은 fan-presets.json에서 조정할 수 있습니다.";
             presetsGroup.Controls.Add(_fanPresetLabel);
+            RefreshFanPresetSelection();
 
             GroupBox boostGroup = new GroupBox();
             boostGroup.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
@@ -419,6 +427,55 @@ namespace PowerModeSwitcher
             return button;
         }
 
+        private void RefreshFanPresetSelection()
+        {
+            string active = null;
+            try
+            {
+                AppState state = _stateRepository.Load();
+                if (state.fan != null)
+                {
+                    active = state.fan.lastAppliedPreset;
+                }
+            }
+            catch
+            {
+                active = null;
+            }
+
+            SetFanButtonSelected(_fanAutoButton, String.Equals(active, "auto", StringComparison.OrdinalIgnoreCase));
+            foreach (KeyValuePair<string, Button> item in _fanPresetButtons)
+            {
+                SetFanButtonSelected(item.Value, String.Equals(active, item.Key, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (_fanPresetLabel != null)
+            {
+                FanPreset selected = _fanPresetDocument == null || _fanPresetDocument.presets == null
+                    ? null
+                    : _fanPresetDocument.presets.FirstOrDefault(delegate(FanPreset preset)
+                    {
+                        return String.Equals(preset.id, active, StringComparison.OrdinalIgnoreCase);
+                    });
+                _fanPresetLabel.Text = selected == null
+                    ? "현재 선택된 안전 팬 곡선 없음 (Auto/Boost/복원 상태)"
+                    : "현재 적용됨: " + selected.name;
+            }
+        }
+
+        private static void SetFanButtonSelected(Button button, bool selected)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            button.BackColor = selected ? Color.FromArgb(40, 103, 160) : Color.White;
+            button.ForeColor = selected ? Color.White : Color.FromArgb(48, 72, 95);
+            button.FlatAppearance.BorderColor = Color.FromArgb(154, 169, 184);
+            button.FlatAppearance.BorderSize = selected ? 0 : 1;
+        }
+
         private void RefreshFanStatus()
         {
             RunFanOperation("팬 상태 확인 중…", delegate { return _fanService.Query(); }, false);
@@ -452,6 +509,10 @@ namespace PowerModeSwitcher
 
                     FanActionResult result = completedTask.Result;
                     UpdateFanStatus(result.status);
+                    if (result.success)
+                    {
+                        RefreshFanPresetSelection();
+                    }
                     if (showResult || !result.success)
                     {
                         MessageBox.Show(
