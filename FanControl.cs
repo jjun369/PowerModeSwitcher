@@ -112,17 +112,17 @@ namespace PowerModeSwitcher
 
         private static void ValidateSpeeds(int[] values, string fanName, string presetId)
         {
-            if (values == null || values.Length != 6 || values[0] != 0 || values[5] != 100)
+            if (values == null || values.Length != 6 || values[0] != 0 || values[5] != 255)
             {
-                throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0%로 시작해 100%로 끝나는 6개 포인트여야 합니다.");
+                throw new InvalidDataException(presetId + "의 " + fanName + " 팬 레벨은 0으로 시작해 255(EC 최대)로 끝나는 6개 포인트여야 합니다.");
             }
 
             int index;
             for (index = 0; index < values.Length; index++)
             {
-                if (values[index] < 0 || values[index] > 100 || (index > 0 && values[index] < values[index - 1]))
+                if (values[index] < 0 || values[index] > 255 || (index > 0 && values[index] < values[index - 1]))
                 {
-                    throw new InvalidDataException(presetId + "의 " + fanName + " 팬 속도는 0~100 범위에서 감소하지 않아야 합니다.");
+                    throw new InvalidDataException(presetId + "의 " + fanName + " 팬 레벨은 0~255 범위에서 감소하지 않아야 합니다.");
                 }
             }
         }
@@ -300,7 +300,7 @@ namespace PowerModeSwitcher
                         Copy(before.gpuTemperatures),
                         preset.gpuSpeeds);
                     Remember(preset.id);
-                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) 적용했습니다. 현재 온도 포인트를 유지하고 속도 곡선만 교체했습니다. 팬 RPM은 1~3초 후 안정됩니다.", after);
+                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) 적용했습니다. 현재 온도 포인트를 유지하고 EC 속도 레벨만 교체했습니다. 팬 RPM은 1~3초 후 안정됩니다.", after);
                 }
                 catch (Exception exception)
                 {
