@@ -314,7 +314,7 @@ namespace PowerModeSwitcher
             presetHint.ForeColor = Color.FromArgb(79, 93, 108);
             presetHint.Location = new Point(15, 24);
             presetHint.Size = new Size(1000, 25);
-            presetHint.Text = "버튼을 누르면 즉시 적용됩니다. 곡선 편집 중에도 온도가 높아지면 마지막 포인트에서 100%가 됩니다.";
+            presetHint.Text = "버튼을 누르면 EC 곡선표에 적용됩니다. 현재 팬 RPM은 온도 컨트롤러가 재평가한 뒤 1~3초 안에 변합니다. 최대 회전은 Cooler Boost를 사용하세요.";
             presetsGroup.Controls.Add(presetHint);
 
             FlowLayoutPanel presetButtons = new FlowLayoutPanel();
@@ -459,6 +459,36 @@ namespace PowerModeSwitcher
                             result.title,
                             MessageBoxButtons.OK,
                             result.success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    }
+
+                    if (showResult && result.success)
+                    {
+                        Task.Factory.StartNew(delegate
+                        {
+                            System.Threading.Thread.Sleep(1500);
+                            return _fanService.Query();
+                        }).ContinueWith(delegate(Task<FanActionResult> settledTask)
+                        {
+                            if (settledTask.IsCanceled || settledTask.IsFaulted)
+                            {
+                                return;
+                            }
+
+                            try
+                            {
+                                BeginInvoke((MethodInvoker)delegate
+                                {
+                                    if (!IsDisposed && !Disposing)
+                                    {
+                                        UpdateFanStatus(settledTask.Result.status);
+                                    }
+                                });
+                            }
+                            catch
+                            {
+                                // The form may close while the settle read is pending.
+                            }
+                        });
                     }
                 });
             });

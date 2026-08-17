@@ -70,9 +70,26 @@ namespace PowerModeSwitcher
 
         public static void ValidateCurve(int[] temperatures, int[] cpuSpeeds, int[] gpuSpeeds)
         {
-            ValidateTemperatures(temperatures, "팬 곡선");
+            ValidateHardwareTemperatures(temperatures, "현재 EC 팬 곡선");
             ValidateSpeeds(cpuSpeeds, "CPU", "사용자 곡선");
             ValidateSpeeds(gpuSpeeds, "GPU", "사용자 곡선");
+        }
+
+        private static void ValidateHardwareTemperatures(int[] values, string name)
+        {
+            if (values == null || values.Length != 6 || values[0] != 0 || values[5] < 50)
+            {
+                throw new InvalidDataException(name + " 온도 포인트를 읽을 수 없습니다.");
+            }
+
+            int index;
+            for (index = 0; index < values.Length; index++)
+            {
+                if (values[index] < 0 || values[index] > 100 || (index > 0 && values[index] <= values[index - 1]))
+                {
+                    throw new InvalidDataException(name + " 온도 포인트가 올바르지 않습니다.");
+                }
+            }
         }
 
         private static void ValidateTemperatures(int[] values, string name)
@@ -272,14 +289,17 @@ namespace PowerModeSwitcher
                 {
                     FanHardwareStatus before = RequireWritableStatus();
                     CaptureBaseline(before);
+                    // MSI's EC treats the temperature columns as a fixed table layout.
+                    // Keep the live model-specific points and replace only the requested
+                    // speed columns; writing generic 0/50/60/70/80/90 points can be ignored.
                     FanHardwareStatus after = _backend.ApplyCurve(
                         _configuration,
-                        _configuration.temperaturePoints,
+                        Copy(before.cpuTemperatures),
                         preset.cpuSpeeds,
-                        _configuration.temperaturePoints,
+                        Copy(before.gpuTemperatures),
                         preset.gpuSpeeds);
                     Remember(preset.id);
-                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) 적용했습니다. 90°C에서는 양쪽 팬이 100%가 되도록 설정됩니다.", after);
+                    return FanActionResult.Success("팬 곡선 적용", preset.name + "을(를) 적용했습니다. 현재 온도 포인트를 유지하고 속도 곡선만 교체했습니다. 팬 RPM은 1~3초 후 안정됩니다.", after);
                 }
                 catch (Exception exception)
                 {
@@ -342,11 +362,6 @@ namespace PowerModeSwitcher
                     }
 
                     FanHardwareStatus current = RequireWritableStatus();
-                    if (!String.Equals(current.firmware, state.fan.baseline.firmware, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return FanActionResult.Failure("팬 baseline 복원", "BIOS/EC 펌웨어가 baseline 저장 이후 변경되어 복원하지 않았습니다.", current);
-                    }
-
                     FanHardwareStatus after = _backend.Restore(_configuration, state.fan.baseline);
                     Remember("restore");
                     return FanActionResult.Success("팬 baseline 복원", "PowerModeSwitcher가 저장한 최초 팬 설정을 복원했습니다.", after);
@@ -919,6 +934,8 @@ namespace PowerModeSwitcher
 
             FanHardwareStatus status = new FanHardwareStatus
             {
+                fanMode = baseline.fanMode,
+                coolerBoost = baseline.coolerBoost,
                 cpuTemperatures = baseline.cpuTemperatures,
                 cpuSpeeds = baseline.cpuSpeeds,
                 gpuTemperatures = baseline.gpuTemperatures,
