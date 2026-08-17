@@ -53,7 +53,7 @@
       "tau": 28,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 60W", "PL2 90W", "Tau 28초", "144Hz 유지"],
-      "notes": ["PL1/PL2/Tau는 검증된 기존 PL backend가 있을 때만 적용합니다.", "Turbo는 호출자가 명시적으로 전달한 전원 구성표에만 적용합니다."],
+      "notes": ["PL1/PL2는 MSI Center 기존 backend로 적용합니다. Tau는 MSI backend에 쓰기 API가 없어 변경하지 않습니다.", "Turbo는 호출자가 명시적으로 전달한 전원 구성표에만 적용합니다."],
       "isRestore": false
     },
     {
@@ -67,7 +67,7 @@
       "tau": 16,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 40W", "PL2 65W", "Tau 16초", "144Hz 유지"],
-      "notes": ["11800H 성능을 상당 부분 유지하면서 발열을 줄이는 값입니다.", "PL1/PL2/Tau는 검증된 기존 PL backend가 있을 때만 적용합니다."],
+      "notes": ["11800H 성능을 상당 부분 유지하면서 발열을 줄이는 값입니다.", "PL1/PL2는 MSI Center 기존 backend로 적용합니다. Tau는 MSI backend에 쓰기 API가 없어 변경하지 않습니다."],
       "isRestore": false
     },
     {
@@ -81,7 +81,7 @@
       "tau": 8,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 25W", "PL2 40W", "Tau 8초", "144Hz 유지"],
-      "notes": ["성능 대비 전력 효율을 중시합니다.", "PL1/PL2/Tau는 검증된 기존 PL backend가 있을 때만 적용합니다."],
+      "notes": ["성능 대비 전력 효율을 중시합니다.", "PL1/PL2는 MSI Center 기존 backend로 적용합니다. Tau는 MSI backend에 쓰기 API가 없어 변경하지 않습니다."],
       "isRestore": false
     },
     {
@@ -95,7 +95,7 @@
       "tau": 4,
       "refreshRate": 144,
       "changes": ["dGPU OFF", "Turbo Boost ON", "PL1 15W", "PL2 25W", "Tau 4초", "144Hz 유지"],
-      "notes": ["Turbo Boost는 끄지 않아 반응성을 유지합니다.", "Silent와 구분되는 배터리 효율 모드입니다.", "PL1/PL2/Tau는 검증된 기존 PL backend가 있을 때만 적용합니다."],
+      "notes": ["Turbo Boost는 끄지 않아 반응성을 유지합니다.", "Silent와 구분되는 배터리 효율 모드입니다.", "PL1/PL2는 MSI Center 기존 backend로 적용합니다. Tau는 MSI backend에 쓰기 API가 없어 변경하지 않습니다."],
       "isRestore": false
     },
     {
@@ -109,7 +109,7 @@
       "tau": 8,
       "refreshRate": 144,
       "changes": ["dGPU ON", "Turbo Boost ON", "PL1 35W", "PL2 55W", "Tau 8초", "144Hz 유지"],
-      "notes": ["PL 수치는 이 파일에서 조정할 수 있습니다.", "PL1/PL2/Tau는 검증된 기존 PL backend가 있을 때만 적용합니다."],
+      "notes": ["PL 수치는 이 파일에서 조정할 수 있습니다.", "PL1/PL2는 MSI Center 기존 backend로 적용합니다. Tau는 MSI backend에 쓰기 API가 없어 변경하지 않습니다."],
       "isRestore": false
     }
   ]

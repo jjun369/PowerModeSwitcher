@@ -5,7 +5,9 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -1119,6 +1121,7 @@ namespace PowerModeSwitcher
         private readonly BackendClient _backend;
         private readonly PowerPlanService _powerPlans;
         private readonly DisplayRefreshService _displayRefresh;
+        private readonly MsiPowerLimitBackend _powerLimits;
 
         public PowerModeService(
             StateRepository stateRepository,
@@ -1130,6 +1133,7 @@ namespace PowerModeSwitcher
             _backend = backend;
             _powerPlans = powerPlans;
             _displayRefresh = displayRefresh;
+            _powerLimits = new MsiPowerLimitBackend();
         }
 
         public ProfileApplyResult Apply(PowerProfile profile)
@@ -1137,12 +1141,12 @@ namespace PowerModeSwitcher
             ProfileApplyResult result = new ProfileApplyResult(profile);
             AppState state = _stateRepository.Load();
 
-            CaptureBaseline(state, result);
+            CaptureBaseline(state, result, profile);
             _stateRepository.Save(state);
 
             ApplyDGpu(profile, state, result);
             ApplyTurbo(profile, state, result);
-            ApplyPl(profile, result);
+            ApplyPl(profile, state, result);
             ApplyRefresh(profile, result);
 
             if (!result.HasFailures)
@@ -1156,7 +1160,7 @@ namespace PowerModeSwitcher
             return result;
         }
 
-        private void CaptureBaseline(AppState state, ProfileApplyResult result)
+        private void CaptureBaseline(AppState state, ProfileApplyResult result, PowerProfile profile)
         {
             state.baseline = state.baseline ?? new BaselineState();
             List<string> captured = new List<string>();
@@ -1188,6 +1192,23 @@ namespace PowerModeSwitcher
                 else
                 {
                     unavailable.Add("dGPU 상태: " + response.ErrorText);
+                }
+            }
+
+            bool profileNeedsPowerLimits = profile != null &&
+                (profile.isRestore || profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue);
+            if (profileNeedsPowerLimits && (!state.baseline.pl1.HasValue || !state.baseline.pl2.HasValue))
+            {
+                PowerLimitStatus powerLimits = _powerLimits.Query();
+                if (powerLimits != null && powerLimits.writeEnabled)
+                {
+                    state.baseline.pl1 = powerLimits.pl1;
+                    state.baseline.pl2 = powerLimits.pl2;
+                    captured.Add("PL1/PL2 상태");
+                }
+                else
+                {
+                    unavailable.Add("PL1/PL2 상태: " + (powerLimits == null ? "읽기 실패" : powerLimits.message));
                 }
             }
 
@@ -1287,23 +1308,289 @@ namespace PowerModeSwitcher
                 ProfileText.Turbo(desired) + " · PowerModeSwitcher 관리 전원 구성표를 활성화했습니다."));
         }
 
-        private static void ApplyPl(PowerProfile profile, ProfileApplyResult result)
+        private void ApplyPl(PowerProfile profile, AppState state, ProfileApplyResult result)
         {
             bool requested = profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue;
-            if (!requested)
+            if (!requested && !profile.isRestore)
             {
                 result.Add(SettingResult.Skipped("PL1 / PL2 / Tau", "변경하지 않음"));
                 return;
             }
 
-            result.Add(SettingResult.Failure(
-                "PL1 / PL2 / Tau",
-                "검증된 기존 PL backend를 찾지 못해 적용하지 않았습니다. ThrottleStop에는 접근하지 않았습니다."));
+            if (profile.isRestore)
+            {
+                if (state.baseline == null || !state.baseline.pl1.HasValue || !state.baseline.pl2.HasValue)
+                {
+                    result.Add(SettingResult.Warning(
+                        "PL1 / PL2",
+                        "저장된 PL1/PL2 baseline이 없어 원래 값을 추정하지 않았습니다."));
+                }
+                else
+                {
+                    PowerLimitApplyResult restored = _powerLimits.Apply(state.baseline.pl1.Value, state.baseline.pl2.Value);
+                    result.Add(restored.success
+                        ? SettingResult.Success("PL1 / PL2", restored.message)
+                        : SettingResult.Failure("PL1 / PL2", restored.message));
+                }
+
+                if (profile.tau.HasValue)
+                {
+                    result.Add(SettingResult.Warning("Tau", "MSI Center 기존 backend에 Tau 쓰기 API가 없어 변경하지 않았습니다."));
+                }
+                return;
+            }
+
+            if (profile.pl1.HasValue && profile.pl2.HasValue)
+            {
+                PowerLimitApplyResult applied = _powerLimits.Apply(profile.pl1.Value, profile.pl2.Value);
+                result.Add(applied.success
+                    ? SettingResult.Success("PL1 / PL2", applied.message)
+                    : SettingResult.Failure("PL1 / PL2", applied.message));
+            }
+            else
+            {
+                result.Add(SettingResult.Warning("PL1 / PL2", "PL1과 PL2를 함께 지정하지 않아 변경하지 않았습니다."));
+            }
+
+            if (profile.tau.HasValue)
+            {
+                result.Add(SettingResult.Warning(
+                    "Tau",
+                    "MSI Center 기존 backend에 Tau 쓰기 API가 없어 요청값 " + profile.tau.Value + "초는 변경하지 않았습니다."));
+            }
         }
 
         private void ApplyRefresh(PowerProfile profile, ProfileApplyResult result)
         {
             result.Add(_displayRefresh.EnsureRefreshRate(profile.refreshRate));
+        }
+    }
+
+    internal sealed class PowerLimitApplyResult
+    {
+        public bool success { get; set; }
+        public string message { get; set; }
+        public PowerLimitStatus status { get; set; }
+
+        public static PowerLimitApplyResult Success(string message, PowerLimitStatus status)
+        {
+            return new PowerLimitApplyResult { success = true, message = message, status = status };
+        }
+
+        public static PowerLimitApplyResult Failure(string message, PowerLimitStatus status)
+        {
+            return new PowerLimitApplyResult { success = false, message = message, status = status };
+        }
+    }
+
+    // MSI Center already ships this model-specific PL1/PL2 path. Reuse it rather
+    // than opening ThrottleStop or adding a new kernel/MSR driver.
+    internal sealed class MsiPowerLimitBackend
+    {
+        private const string ApiPath = @"C:\Program Files (x86)\MSI\MSI Center\Base Module\API_NB_Base Module.dll";
+        private static readonly string[] AssemblyDirectories = new string[]
+        {
+            @"C:\Program Files (x86)\MSI\MSI Center\Base Module",
+            @"C:\Program Files (x86)\MSI\MSI Center",
+            @"C:\Program Files (x86)\MSI\MSI Center\System Diagnosis",
+            @"C:\Program Files (x86)\MSI\MSI Center\Gaming Gear\MEG381_KC",
+            @"C:\Program Files (x86)\MSI\MSI NBFoundation Service"
+        };
+
+        private readonly object _sync = new object();
+        private readonly MsiFanWmiBackend _readback = new MsiFanWmiBackend();
+        private MethodInfo _setPowerLimit;
+        private ResolveEventHandler _resolver;
+        private string _loadError;
+
+        public PowerLimitStatus Query()
+        {
+            return _readback.QueryPowerLimits();
+        }
+
+        public PowerLimitApplyResult Apply(int pl1, int pl2)
+        {
+            if (pl1 <= 0 || pl1 > 255 || pl2 <= 0 || pl2 > 255 || pl2 < pl1)
+            {
+                return PowerLimitApplyResult.Failure(
+                    "PL1/PL2 값은 1~255W 범위에서 PL2가 PL1 이상이어야 합니다.",
+                    null);
+            }
+
+            lock (_sync)
+            {
+                PowerLimitStatus before = _readback.QueryPowerLimits();
+                if (before == null || !before.writeEnabled)
+                {
+                    return PowerLimitApplyResult.Failure(
+                        before == null ? "PL1/PL2 상태를 읽지 못했습니다." : before.message,
+                        before);
+                }
+
+                try
+                {
+                    EnsureApi();
+                    _setPowerLimit.Invoke(null, new object[] { pl1, pl2 });
+                    Thread.Sleep(220);
+                    PowerLimitStatus after = _readback.QueryPowerLimits();
+                    if (after == null || !after.writeEnabled || after.pl1 != pl1 || after.pl2 != pl2)
+                    {
+                        throw new InvalidOperationException(
+                            "MSI Center PL backend 호출 후 readback이 일치하지 않습니다. 요청: " +
+                            pl1 + "W / " + pl2 + "W, 결과: " +
+                            (after == null ? "읽기 실패" : after.pl1 + "W / " + after.pl2 + "W"));
+                    }
+
+                    return PowerLimitApplyResult.Success(
+                        "MSI Center 기존 PL backend로 " + pl1 + "W / " + pl2 + "W를 적용하고 readback을 확인했습니다.",
+                        after);
+                }
+                catch (Exception exception)
+                {
+                    string restoreMessage = TryRestore(before);
+                    PowerLimitStatus current = _readback.QueryPowerLimits();
+                    return PowerLimitApplyResult.Failure(
+                        "PL1/PL2 적용 실패: " + FriendlyError(exception) + " " + restoreMessage,
+                        current);
+                }
+            }
+        }
+
+        private string TryRestore(PowerLimitStatus before)
+        {
+            if (before == null || !before.writeEnabled || before.pl1 <= 0 || before.pl2 < before.pl1)
+            {
+                return "기존 PL snapshot이 없어 복원하지 않았습니다.";
+            }
+
+            try
+            {
+                EnsureApi();
+                _setPowerLimit.Invoke(null, new object[] { before.pl1, before.pl2 });
+                Thread.Sleep(160);
+                PowerLimitStatus restored = _readback.QueryPowerLimits();
+                return restored != null && restored.pl1 == before.pl1 && restored.pl2 == before.pl2
+                    ? "기존 PL1/PL2를 복원했습니다."
+                    : "기존 PL1/PL2 복원 readback이 일치하지 않습니다.";
+            }
+            catch (Exception exception)
+            {
+                return "기존 PL1/PL2 복원도 실패했습니다: " + FriendlyError(exception);
+            }
+        }
+
+        private void EnsureApi()
+        {
+            if (_setPowerLimit != null)
+            {
+                return;
+            }
+
+            if (!String.IsNullOrWhiteSpace(_loadError))
+            {
+                throw new InvalidOperationException(_loadError);
+            }
+
+            if (!File.Exists(ApiPath))
+            {
+                _loadError = "MSI Center 기존 PL backend DLL을 찾지 못했습니다: " + ApiPath;
+                throw new FileNotFoundException(_loadError, ApiPath);
+            }
+
+            if (_resolver == null)
+            {
+                _resolver = ResolveMsiAssembly;
+                AppDomain.CurrentDomain.AssemblyResolve += _resolver;
+            }
+
+            try
+            {
+                Assembly assembly = Assembly.LoadFrom(ApiPath);
+                Type userScenario = assembly.GetType("API_Base_Module.UserScenario", true);
+                _setPowerLimit = userScenario.GetMethod(
+                    "setPowerLimit",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(int), typeof(int) },
+                    null);
+                if (_setPowerLimit == null)
+                {
+                    throw new MissingMethodException("MSI Center UserScenario.setPowerLimit(int,int)을 찾지 못했습니다.");
+                }
+            }
+            catch (Exception exception)
+            {
+                _loadError = "MSI Center PL backend를 불러오지 못했습니다: " + FriendlyError(exception);
+                throw new InvalidOperationException(_loadError, exception);
+            }
+        }
+
+        private static Assembly ResolveMsiAssembly(object sender, ResolveEventArgs args)
+        {
+            AssemblyName requested;
+            try
+            {
+                requested = new AssemblyName(args.Name);
+            }
+            catch
+            {
+                return null;
+            }
+
+            List<string> candidates = new List<string>();
+            foreach (string directory in AssemblyDirectories)
+            {
+                if (!Directory.Exists(directory))
+                {
+                    continue;
+                }
+
+                candidates.AddRange(Directory.GetFiles(directory, requested.Name + ".dll"));
+            }
+
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    AssemblyName candidateName = AssemblyName.GetAssemblyName(candidate);
+                    if (String.Equals(candidateName.Name, requested.Name, StringComparison.OrdinalIgnoreCase) &&
+                        candidateName.Version == requested.Version)
+                    {
+                        return Assembly.LoadFrom(candidate);
+                    }
+                }
+                catch
+                {
+                    // Try the next installed copy.
+                }
+            }
+
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    return Assembly.LoadFrom(candidate);
+                }
+                catch
+                {
+                    // Try the next installed copy.
+                }
+            }
+
+            return null;
+        }
+
+        private static string FriendlyError(Exception exception)
+        {
+            Exception current = exception;
+            while (current is TargetInvocationException && current.InnerException != null)
+            {
+                current = current.InnerException;
+            }
+
+            return current == null || String.IsNullOrWhiteSpace(current.Message)
+                ? "알 수 없는 오류"
+                : current.Message;
         }
     }
 
@@ -1972,6 +2259,8 @@ namespace PowerModeSwitcher
     {
         public string activePowerScheme { get; set; }
         public string dGpuState { get; set; }
+        public int? pl1 { get; set; }
+        public int? pl2 { get; set; }
     }
 
     internal sealed class ManagedPlan

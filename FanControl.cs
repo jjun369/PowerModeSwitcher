@@ -264,6 +264,17 @@ namespace PowerModeSwitcher
         }
     }
 
+    internal sealed class PowerLimitStatus
+    {
+        public bool reachable { get; set; }
+        public bool writeEnabled { get; set; }
+        public string systemProductName { get; set; }
+        public string baseBoardProduct { get; set; }
+        public int pl1 { get; set; }
+        public int pl2 { get; set; }
+        public string message { get; set; }
+    }
+
     internal sealed class KeyboardBacklightService
     {
         private const byte OffLevel = 0x80;
@@ -579,6 +590,8 @@ namespace PowerModeSwitcher
         private const byte ShiftModeAddress = 0xD2;
         private const byte KeyboardBacklightAddress = 0xD3;
         private const byte FanModeAddress = 0xD4;
+        private const byte Pl1Address = 0x50;
+        private const byte Pl2Address = 0x51;
         private const byte CoolerBoostAddress = 0x98;
         private const byte CoolerBoostMask = 0x80;
         private const byte AutoMode = 0x0D;
@@ -690,6 +703,48 @@ namespace PowerModeSwitcher
 
                     throw new InvalidOperationException("키보드 조명 변경 후 복원/readback에 실패했습니다.", exception);
                 }
+            }
+        }
+
+        public PowerLimitStatus QueryPowerLimits()
+        {
+            try
+            {
+                MsiSystemIdentity identity = ReadSystemIdentity();
+                return WithSession(delegate(ManagementObject instance, ManagementClass package)
+                {
+                    PowerLimitStatus status = new PowerLimitStatus
+                    {
+                        reachable = true,
+                        systemProductName = identity.systemProductName,
+                        baseBoardProduct = identity.baseBoardProduct
+                    };
+                    if (!HardwareMatches(identity))
+                    {
+                        status.writeEnabled = false;
+                        status.message = "PL backend는 " + FanHardwareGate.SystemProductName + " / " + FanHardwareGate.BaseBoardProduct + " 전용입니다. 감지값: " +
+                            (identity.systemProductName ?? "없음") + " / " + (identity.baseBoardProduct ?? "없음");
+                        return status;
+                    }
+
+                    status.pl1 = ReadByteWith(instance, package, Pl1Address);
+                    status.pl2 = ReadByteWith(instance, package, Pl2Address);
+                    status.writeEnabled = status.pl1 > 0 && status.pl1 <= 255 &&
+                        status.pl2 > 0 && status.pl2 <= 255;
+                    status.message = status.writeEnabled
+                        ? "MSI_ACPI PL1/PL2 readback 완료"
+                        : "PL1/PL2 readback 값이 안전 범위가 아닙니다. 현재값: " + status.pl1 + "W / " + status.pl2 + "W";
+                    return status;
+                });
+            }
+            catch (Exception exception)
+            {
+                return new PowerLimitStatus
+                {
+                    reachable = false,
+                    writeEnabled = false,
+                    message = "PL1/PL2 WMI를 읽지 못했습니다. " + FriendlyError(exception)
+                };
             }
         }
 
