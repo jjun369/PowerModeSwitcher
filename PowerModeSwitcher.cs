@@ -79,7 +79,7 @@ namespace PowerModeSwitcher
         private readonly string _applicationDirectory;
         private readonly ProfileRepository _profileRepository;
         private readonly StateRepository _stateRepository;
-        private readonly PowerModeService _powerModeService;
+        private PowerModeService _powerModeService;
         private readonly FanPresetRepository _fanPresetRepository;
         private readonly List<Button> _applyButtons = new List<Button>();
         private readonly List<Control> _fanActionControls = new List<Control>();
@@ -109,12 +109,6 @@ namespace PowerModeSwitcher
             _profileRepository = new ProfileRepository(Path.Combine(applicationDirectory, "profiles.json"));
             _stateRepository = new StateRepository(Path.Combine(applicationDirectory, "state.json"));
             _fanPresetRepository = new FanPresetRepository(Path.Combine(applicationDirectory, "fan-presets.json"));
-            _powerModeService = new PowerModeService(
-                _stateRepository,
-                new BackendClient(Path.Combine(applicationDirectory, "helpers", "PowerModeBackend.ps1")),
-                new PowerPlanService(),
-                new DisplayRefreshService(),
-                applicationDirectory);
             _keyboardBacklightService = new KeyboardBacklightService();
 
             InitializeWindow();
@@ -276,9 +270,16 @@ namespace PowerModeSwitcher
             {
                 _profiles = _profileRepository.Load();
                 ProfileValidator.Validate(_profiles);
+                InitializeFanControl();
+                _powerModeService = new PowerModeService(
+                    _stateRepository,
+                    new BackendClient(Path.Combine(_applicationDirectory, "helpers", "PowerModeBackend.ps1")),
+                    new PowerPlanService(),
+                    new DisplayRefreshService(),
+                    _fanService,
+                    _applicationDirectory);
                 RenderCards();
                 RefreshLastAppliedLabel();
-                InitializeFanControl();
                 RefreshKeyboardBacklight();
             }
             catch (Exception exception)
@@ -416,7 +417,7 @@ namespace PowerModeSwitcher
             presetButtons.WrapContents = true;
             presetsGroup.Controls.Add(presetButtons);
 
-            _fanAutoButton = CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(); }, true); }, false);
+            _fanAutoButton = CreateFanButton("기본 / Auto", delegate { RunFanOperation("기본 팬 모드 적용 중…", delegate { return _fanService.SetAuto(GetLastAppliedMsiScenario()); }, true); }, false);
             presetButtons.Controls.Add(_fanAutoButton);
             foreach (FanPreset preset in _fanPresetDocument.presets)
             {
@@ -918,8 +919,8 @@ namespace PowerModeSwitcher
             content.AppendLine(profile.purpose);
             content.AppendLine();
             content.AppendLine("목적: " + profile.purpose);
-            content.AppendLine("dGPU: " + ProfileText.DGpu(profile.dGpu));
             content.AppendLine("Turbo Boost: " + ProfileText.Turbo(profile.turbo));
+            content.AppendLine("MSI 시나리오: " + ProfileText.MsiScenario(profile.msiScenario));
             content.AppendLine("PL1: " + ProfileText.Watts(profile.pl1));
             content.AppendLine("PL2: " + ProfileText.Watts(profile.pl2));
             content.AppendLine("Tau: " + ProfileText.Seconds(profile.tau));
@@ -946,6 +947,29 @@ namespace PowerModeSwitcher
                 profile.name,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+        }
+
+        private string GetLastAppliedMsiScenario()
+        {
+            try
+            {
+                AppState state = _stateRepository.Load();
+                if (state.fan != null && ProfileText.IsOneOf(state.fan.profileScenario, "balanced", "super-battery", "extreme"))
+                {
+                    return state.fan.profileScenario;
+                }
+                PowerProfile profile = (_profiles ?? new List<PowerProfile>()).FirstOrDefault(delegate(PowerProfile candidate)
+                {
+                    return candidate != null && String.Equals(candidate.id, state.lastAppliedProfile, StringComparison.OrdinalIgnoreCase);
+                });
+                return profile != null && ProfileText.IsOneOf(profile.msiScenario, "balanced", "super-battery", "extreme")
+                    ? profile.msiScenario
+                    : "balanced";
+            }
+            catch
+            {
+                return "balanced";
+            }
         }
 
         private void ApplyProfile(PowerProfile profile)
@@ -1170,14 +1194,14 @@ namespace PowerModeSwitcher
                     throw new InvalidDataException(profile.id + "의 화면 주사율은 144Hz여야 합니다.");
                 }
 
-                if (!ProfileText.IsOneOf(profile.dGpu, "on", "off", "restore", "unchanged"))
-                {
-                    throw new InvalidDataException(profile.id + "의 dGpu 값이 올바르지 않습니다.");
-                }
-
                 if (!ProfileText.IsOneOf(profile.turbo, "on", "off", "restore", "unchanged"))
                 {
                     throw new InvalidDataException(profile.id + "의 turbo 값이 올바르지 않습니다.");
+                }
+
+                if (!ProfileText.IsOneOf(profile.msiScenario, "balanced", "super-battery", "extreme", "unchanged"))
+                {
+                    throw new InvalidDataException(profile.id + "의 msiScenario 값이 올바르지 않습니다.");
                 }
 
                 bool anyPlValue = profile.pl1.HasValue || profile.pl2.HasValue || profile.tau.HasValue;
@@ -1198,18 +1222,21 @@ namespace PowerModeSwitcher
         private readonly PowerPlanService _powerPlans;
         private readonly DisplayRefreshService _displayRefresh;
         private readonly CpuPowerBackend _cpuPower;
+        private readonly FanService _fanService;
 
         public PowerModeService(
             StateRepository stateRepository,
             BackendClient backend,
             PowerPlanService powerPlans,
             DisplayRefreshService displayRefresh,
+            FanService fanService,
             string applicationDirectory)
         {
             _stateRepository = stateRepository;
             _backend = backend;
             _powerPlans = powerPlans;
             _displayRefresh = displayRefresh;
+            _fanService = fanService;
             _cpuPower = new PawnIoIntelPowerBackend(Path.Combine(applicationDirectory, "helpers", "PawnIO"));
         }
 
@@ -1221,7 +1248,7 @@ namespace PowerModeSwitcher
             CaptureBaseline(state, result, profile);
             _stateRepository.Save(state);
 
-            ApplyDGpu(profile, state, result);
+            ApplyMsiScenario(profile, state, result);
             ApplyTurbo(profile, state, result);
             ApplyPl(profile, state, result);
             ApplyRefresh(profile, result);
@@ -1235,6 +1262,38 @@ namespace PowerModeSwitcher
             }
 
             return result;
+        }
+
+        private void ApplyMsiScenario(PowerProfile profile, AppState state, ProfileApplyResult result)
+        {
+            string desired = (profile.msiScenario ?? String.Empty).Trim().ToLowerInvariant();
+            if (desired == "unchanged")
+            {
+                result.Add(SettingResult.Skipped("MSI 시나리오", "변경하지 않음"));
+                return;
+            }
+
+            if (_fanService == null)
+            {
+                result.Add(SettingResult.Failure("MSI 시나리오", "MSI_ACPI 팬/시나리오 backend를 초기화하지 못했습니다."));
+                return;
+            }
+
+            FanActionResult action = _fanService.SetScenario(desired);
+            if (action.success && action.status != null)
+            {
+                AppState latest = _stateRepository.Load();
+                state.fan = latest.fan ?? new FanState();
+                state.fan.profileScenario = desired;
+                _stateRepository.Save(state);
+                result.Add(SettingResult.Success(
+                    "MSI 시나리오",
+                    "요청: " + ProfileText.MsiScenario(desired) + " / 결과: " + FanText.Shift(action.status.shiftMode)));
+            }
+            else
+            {
+                result.Add(SettingResult.Failure("MSI 시나리오", action == null ? "적용 결과가 없습니다." : action.message));
+            }
         }
 
         public CpuPowerBackendStatus QueryCpuPower()
@@ -1260,20 +1319,6 @@ namespace PowerModeSwitcher
                 else
                 {
                     unavailable.Add("Windows 전원 구성표: " + error);
-                }
-            }
-
-            if (String.IsNullOrWhiteSpace(state.baseline.dGpuState))
-            {
-                BackendResponse response = _backend.QueryDGpu();
-                if (response.ok && response.dGpu != null)
-                {
-                    state.baseline.dGpuState = response.dGpu.enabled ? "on" : "off";
-                    captured.Add("dGPU 상태");
-                }
-                else
-                {
-                    unavailable.Add("dGPU 상태: " + response.ErrorText);
                 }
             }
 
@@ -1312,38 +1357,6 @@ namespace PowerModeSwitcher
                     ? unavailable[0]
                     : String.Join(" / ", unavailable.ToArray());
                 result.Add(SettingResult.Warning("복원 기준", message + " — OEM 기본값을 추정하지 않습니다."));
-            }
-        }
-
-        private void ApplyDGpu(PowerProfile profile, AppState state, ProfileApplyResult result)
-        {
-            string desired = (profile.dGpu ?? String.Empty).Trim().ToLowerInvariant();
-            if (desired == "unchanged")
-            {
-                result.Add(SettingResult.Skipped("dGPU", "변경하지 않음"));
-                return;
-            }
-
-            if (desired == "restore")
-            {
-                if (state.baseline == null || String.IsNullOrWhiteSpace(state.baseline.dGpuState))
-                {
-                    result.Add(SettingResult.Failure("dGPU", "저장된 baseline이 없어 원래 상태를 추정하지 않았습니다."));
-                    return;
-                }
-
-                desired = state.baseline.dGpuState;
-            }
-
-            BackendResponse response = _backend.SetDGpu(desired);
-            if (response.ok)
-            {
-                string applied = response.dGpu == null ? desired : (response.dGpu.enabled ? "on" : "off");
-                result.Add(SettingResult.Success("dGPU", "요청: " + ProfileText.DGpu(desired) + " / 결과: " + ProfileText.DGpu(applied)));
-            }
-            else
-            {
-                result.Add(SettingResult.Failure("dGPU", response.ErrorText));
             }
         }
 
@@ -1596,16 +1609,6 @@ namespace PowerModeSwitcher
         public BackendClient(string helperPath)
         {
             _helperPath = helperPath;
-        }
-
-        public BackendResponse QueryDGpu()
-        {
-            return Invoke("-Operation Dgpu -State Query");
-        }
-
-        public BackendResponse SetDGpu(string state)
-        {
-            return Invoke("-Operation Dgpu -State " + CommandLine.Quote(state));
         }
 
         public BackendResponse SetTurbo(string state, string schemeGuid)
@@ -1902,17 +1905,10 @@ namespace PowerModeSwitcher
     {
         public static string Compact(PowerProfile profile)
         {
-            return "dGPU " + DGpu(profile.dGpu) + "  ·  Turbo " + Turbo(profile.turbo) +
+            return "Turbo " + Turbo(profile.turbo) +
+                "  ·  MSI " + MsiScenario(profile.msiScenario) +
                 "  ·  " + Watts(profile.pl1) + "/" + Watts(profile.pl2) +
                 "  ·  Tau " + Seconds(profile.tau) + "  ·  " + profile.refreshRate + "Hz";
-        }
-
-        public static string DGpu(string value)
-        {
-            if (String.Equals(value, "on", StringComparison.OrdinalIgnoreCase)) return "ON";
-            if (String.Equals(value, "off", StringComparison.OrdinalIgnoreCase)) return "OFF";
-            if (String.Equals(value, "restore", StringComparison.OrdinalIgnoreCase)) return "원래 상태";
-            return "변경 안 함";
         }
 
         public static string Turbo(string value)
@@ -1920,6 +1916,14 @@ namespace PowerModeSwitcher
             if (String.Equals(value, "on", StringComparison.OrdinalIgnoreCase)) return "ON";
             if (String.Equals(value, "off", StringComparison.OrdinalIgnoreCase)) return "OFF";
             if (String.Equals(value, "restore", StringComparison.OrdinalIgnoreCase)) return "원래 상태";
+            return "변경 안 함";
+        }
+
+        public static string MsiScenario(string value)
+        {
+            if (String.Equals(value, "balanced", StringComparison.OrdinalIgnoreCase)) return "Balanced";
+            if (String.Equals(value, "super-battery", StringComparison.OrdinalIgnoreCase)) return "Super Battery";
+            if (String.Equals(value, "extreme", StringComparison.OrdinalIgnoreCase)) return "Extreme";
             return "변경 안 함";
         }
 
@@ -2106,10 +2110,8 @@ namespace PowerModeSwitcher
     {
         public bool success { get; set; }
         public string message { get; set; }
-        public BackendDGpu value { get; set; }
 
         public bool ok { get { return success; } }
-        public BackendDGpu dGpu { get { return value; } }
 
         public string ErrorText
         {
@@ -2122,14 +2124,6 @@ namespace PowerModeSwitcher
         }
     }
 
-    internal sealed class BackendDGpu
-    {
-        public string instanceId { get; set; }
-        public bool enabled { get; set; }
-        public string status { get; set; }
-        public string problem { get; set; }
-    }
-
     internal sealed class ProfileDocument
     {
         public List<PowerProfile> profiles { get; set; }
@@ -2140,8 +2134,8 @@ namespace PowerModeSwitcher
         public string id { get; set; }
         public string name { get; set; }
         public string purpose { get; set; }
-        public string dGpu { get; set; }
         public string turbo { get; set; }
+        public string msiScenario { get; set; }
         public int? pl1 { get; set; }
         public int? pl2 { get; set; }
         public int? tau { get; set; }
@@ -2163,7 +2157,6 @@ namespace PowerModeSwitcher
     internal sealed class BaselineState
     {
         public string activePowerScheme { get; set; }
-        public string dGpuState { get; set; }
         public int? pl1 { get; set; }
         public int? pl2 { get; set; }
         public string cpuPowerMsrRaw { get; set; }
@@ -2203,6 +2196,28 @@ namespace PowerModeSwitcher
                 }
 
                 IntelRaplCodec.AssertSelfTest();
+                MsiFanWmiBackend.AssertScenarioMapping();
+
+                Dictionary<string, string> expectedScenarios = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "silent", "balanced" },
+                    { "cpu-performance", "extreme" },
+                    { "balanced", "balanced" },
+                    { "eco", "super-battery" },
+                    { "ultra-battery", "super-battery" },
+                    { "gaming-efficient", "extreme" }
+                };
+                foreach (KeyValuePair<string, string> expected in expectedScenarios)
+                {
+                    PowerProfile profile = profiles.FirstOrDefault(delegate(PowerProfile candidate)
+                    {
+                        return candidate != null && String.Equals(candidate.id, expected.Key, StringComparison.OrdinalIgnoreCase);
+                    });
+                    if (profile == null || !String.Equals(profile.msiScenario, expected.Value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(expected.Key + "의 MSI 시나리오 매핑이 올바르지 않습니다.");
+                    }
+                }
 
                 foreach (PowerProfile profile in profiles)
                 {
@@ -2219,7 +2234,7 @@ namespace PowerModeSwitcher
                     }
                 }
 
-                Console.WriteLine("PASS: 8 profiles and fan curves parsed; 144Hz and fan safety constraints validated; no hardware setting was changed.");
+                Console.WriteLine("PASS: 8 profiles and fan curves parsed; 144Hz/fan safety validated; graphics device control is unmanaged; no hardware setting was changed.");
                 return 0;
             }
             catch (Exception exception)

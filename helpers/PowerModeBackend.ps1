@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Dgpu', 'Turbo')]
+    [ValidateSet('Turbo')]
     [string]$Operation,
 
     [Parameter(Mandatory)]
@@ -14,8 +14,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Identifiers intentionally match the verified PowerProfiles scripts.
-$gpuInstanceId = 'PCI\VEN_10DE&DEV_249D&SUBSYS_12FB1462&REV_A1\4&AFF0EE3&0&0008'
+# The graphics device is intentionally not managed here; MSI Center/Optimus owns it.
 $boostModeGuid = 'be337238-0d82-4146-a960-4f3749d470c7'
 
 function Write-Result {
@@ -36,16 +35,6 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Get-DGpuState {
-    $gpu = Get-PnpDevice -InstanceId $gpuInstanceId -ErrorAction Stop
-    return [ordered]@{
-        instanceId = $gpuInstanceId
-        enabled = ($gpu.Problem -ne 'CM_PROB_DISABLED')
-        status = [string]$gpu.Status
-        problem = [string]$gpu.Problem
-    }
-}
-
 function Invoke-PowerCfg {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -56,24 +45,6 @@ function Invoke-PowerCfg {
 }
 
 try {
-    if ($Operation -eq 'Dgpu') {
-        if ($State -eq 'Query') {
-            Write-Result $true 'dGPU state queried.' (Get-DGpuState)
-        }
-        if (-not (Test-IsAdministrator)) {
-            throw 'Administrator privileges are required to change the dGPU state.'
-        }
-
-        $gpu = Get-PnpDevice -InstanceId $gpuInstanceId -ErrorAction Stop
-        if ($State -eq 'Off' -and $gpu.Problem -ne 'CM_PROB_DISABLED') {
-            $null = Disable-PnpDevice -InstanceId $gpuInstanceId -Confirm:$false -ErrorAction Stop
-        }
-        elseif ($State -eq 'On' -and $gpu.Problem -eq 'CM_PROB_DISABLED') {
-            $null = Enable-PnpDevice -InstanceId $gpuInstanceId -Confirm:$false -ErrorAction Stop
-        }
-        Write-Result $true "dGPU set to $State." (Get-DGpuState)
-    }
-
     if ($State -eq 'Query') {
         Write-Result $true 'Turbo Boost query is not implemented; no setting was changed.' $null
     }

@@ -184,6 +184,7 @@ namespace PowerModeSwitcher
     {
         public string lastAppliedPreset { get; set; }
         public string lastAppliedAt { get; set; }
+        public string profileScenario { get; set; }
         public FanBaselineState baseline { get; set; }
     }
 
@@ -418,7 +419,7 @@ namespace PowerModeSwitcher
             }
         }
 
-        public FanActionResult SetAuto()
+        public FanActionResult SetAuto(string scenario)
         {
             lock (_operationLock)
             {
@@ -426,13 +427,37 @@ namespace PowerModeSwitcher
                 {
                     FanHardwareStatus before = RequireWritableStatus();
                     CaptureBaseline(before);
-                    FanHardwareStatus after = _backend.SetAuto(_configuration);
+                    FanHardwareStatus after = _backend.SetAuto(_configuration, scenario);
                     Remember("auto");
-                    return FanActionResult.Success("기본 팬 모드", "MSI Auto / 기본 팬 모드로 복원했습니다.", after);
+                    string scenarioText = MsiFanWmiBackend.IsScenarioChangeRequested(scenario)
+                        ? " MSI 시나리오도 " + FanText.Shift(after.shiftMode) + "(으)로 복원했습니다."
+                        : String.Empty;
+                    return FanActionResult.Success("기본 팬 모드", "MSI Auto / 기본 팬 모드로 복원했습니다." + scenarioText, after);
                 }
                 catch (Exception exception)
                 {
                     return FanActionResult.Failure("기본 팬 모드 실패", exception.Message, SafeQuery());
+                }
+            }
+        }
+
+        public FanActionResult SetScenario(string scenario)
+        {
+            lock (_operationLock)
+            {
+                try
+                {
+                    FanHardwareStatus before = RequireWritableStatus();
+                    CaptureBaseline(before);
+                    FanHardwareStatus after = _backend.SetScenario(_configuration, scenario);
+                    return FanActionResult.Success(
+                        "MSI 시나리오 적용",
+                        FanText.Shift(after.shiftMode) + " 시나리오를 적용하고 WMI readback을 확인했습니다.",
+                        after);
+                }
+                catch (Exception exception)
+                {
+                    return FanActionResult.Failure("MSI 시나리오 적용 실패", exception.Message, SafeQuery());
                 }
             }
         }
@@ -796,24 +821,32 @@ namespace PowerModeSwitcher
             }
         }
 
-        public FanHardwareStatus SetAuto(FanPresetDocument configuration)
+        public FanHardwareStatus SetAuto(FanPresetDocument configuration, string scenario)
         {
             lock (_sync)
             {
                 FanHardwareStatus before = Query(configuration);
                 EnsureWritable(before);
+                byte targetShift;
+                bool changeScenario = TryGetShiftMode(scenario, out targetShift);
                 try
                 {
                     WithSession(delegate(ManagementObject instance, ManagementClass package)
                     {
+                        if (changeScenario && before.shiftMode != targetShift)
+                        {
+                            WriteByteWith(instance, package, ShiftModeAddress, targetShift);
+                            Thread.Sleep(100);
+                        }
                         SetCoolerBoostWith(instance, package, false);
                         WriteByteWith(instance, package, FanModeAddress, AutoMode);
                         return 0;
                     });
                     FanHardwareStatus after = Query(configuration);
-                    if (!MatchesModeAndBoost(after, AutoMode, false))
+                    if (!MatchesModeAndBoost(after, AutoMode, false) ||
+                        (changeScenario && after.shiftMode != targetShift))
                     {
-                        throw new InvalidOperationException("Auto 모드의 WMI 읽기 검증이 일치하지 않습니다.");
+                        throw new InvalidOperationException("Auto 모드 또는 MSI 시나리오의 WMI 읽기 검증이 일치하지 않습니다.");
                     }
 
                     return after;
@@ -824,6 +857,88 @@ namespace PowerModeSwitcher
                     throw new InvalidOperationException("Auto 모드 설정 실패: " + FriendlyError(exception) + " " + restoration, exception);
                 }
             }
+        }
+
+        public FanHardwareStatus SetScenario(FanPresetDocument configuration, string scenario)
+        {
+            byte targetShift;
+            if (!TryGetShiftMode(scenario, out targetShift))
+            {
+                throw new ArgumentException("지원하지 않는 MSI 시나리오입니다: " + (scenario ?? "없음"), "scenario");
+            }
+
+            lock (_sync)
+            {
+                FanHardwareStatus before = Query(configuration);
+                EnsureWritable(before);
+                if (before.shiftMode == targetShift)
+                {
+                    return before;
+                }
+
+                try
+                {
+                    WithSession(delegate(ManagementObject instance, ManagementClass package)
+                    {
+                        WriteByteWith(instance, package, ShiftModeAddress, targetShift);
+                        return 0;
+                    });
+                    Thread.Sleep(150);
+                    FanHardwareStatus after = Query(configuration);
+                    if (after == null || !after.writeEnabled || after.shiftMode != targetShift)
+                    {
+                        throw new InvalidOperationException("MSI 시나리오의 WMI readback이 요청값과 일치하지 않습니다.");
+                    }
+
+                    return after;
+                }
+                catch (Exception exception)
+                {
+                    string restoration = TryRestoreAfterFailure(before);
+                    throw new InvalidOperationException("MSI 시나리오 설정 실패: " + FriendlyError(exception) + " " + restoration, exception);
+                }
+            }
+        }
+
+        public static bool IsScenarioChangeRequested(string scenario)
+        {
+            byte ignored;
+            return TryGetShiftMode(scenario, out ignored);
+        }
+
+        public static void AssertScenarioMapping()
+        {
+            byte mode;
+            if (!TryGetShiftMode("balanced", out mode) || mode != BalancedShiftMode ||
+                !TryGetShiftMode("super-battery", out mode) || mode != SuperBatteryShiftMode ||
+                !TryGetShiftMode("extreme", out mode) || mode != ExtremeShiftMode ||
+                TryGetShiftMode("unchanged", out mode))
+            {
+                throw new InvalidOperationException("MSI 시나리오 EC 값 매핑 자가진단에 실패했습니다.");
+            }
+        }
+
+        private static bool TryGetShiftMode(string scenario, out byte mode)
+        {
+            string value = (scenario ?? String.Empty).Trim().ToLowerInvariant();
+            if (value == "balanced")
+            {
+                mode = BalancedShiftMode;
+                return true;
+            }
+            if (value == "super-battery")
+            {
+                mode = SuperBatteryShiftMode;
+                return true;
+            }
+            if (value == "extreme")
+            {
+                mode = ExtremeShiftMode;
+                return true;
+            }
+
+            mode = 0;
+            return false;
         }
 
         public FanHardwareStatus SetCoolerBoost(FanPresetDocument configuration, bool enabled)
